@@ -32,3 +32,9 @@ vignettes/*.pdf
 *.utf8.md
 *.knit.md
 .Rproj.user
+
+# Databases
+.sqlite
+
+# Markdown notebook preview files
+.nb.html

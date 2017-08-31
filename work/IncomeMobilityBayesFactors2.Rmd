@@ -3,12 +3,19 @@ title: "Reducing Income Equality through Elite Education"
 author: "Michael L. Thompson"
 date: "February 25, 2017"
 output:
+  html_notebook:
+    toc: yes
+    toc_depth: 4
   html_document:
     fig_height: 8
     fig_width: 10
     toc: yes
+    toc_depth: 4
   pdf_document:
     toc: yes
+    toc_depth: 4
+urlcolor: red
+linkcolor: blue
 ---
 
 # Introduction
@@ -20,13 +27,11 @@ of lower-to-middle-income students.
 
 We'll limit the analysis to just the colleges meeting these criteria, which divide the colleges, and the students that attend them, into two groups -- those at large public universities and those at high-median-SAT private colleges:
 
-```{r setup_pkgs, echo=FALSE, message=FALSE, warning=FALSE}
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
 
 library( RSQLite )     # for SQLite manipulation of database
 library( magrittr )    # for piping with infix %>%, %<>%, %T>% (for cool, sophistication effect)
-library( tidyr )       # for reshaping data (e.g., 'gather')
-library( dplyr )       # for data wrangling (e.g., 'filter', 'select', 'summarize', 'inner_join')
-library( ggplot2 )     # for best-in-class visualization
+library( tidyverse )   # for data wrangling & best-in-class visualization
 library( gridExtra )   # for grid layout of ggplots
 library( formattable ) # for display of data.frame tables
 library( htmltools )   # for more control over HTML
