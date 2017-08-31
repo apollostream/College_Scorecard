@@ -236,7 +236,7 @@ Now, let's take a look at some of the differences between the two categories of 
 + Lower-to-middle-income students graduating from the elite private colleges leave with considerably less debt than do those of the same
   income cohort groups graduating from the public colleges.
   
-```{r firstgen, warning=FALSE, message=FALSE}
+```{r firstgen, warning=FALSE, message=FALSE,fig.width=10,fig.height=8}
 
 # First Generation College: first_gen
 # SAT distributions: SAT_AVG
@@ -310,7 +310,7 @@ the students who attended the elite private colleges, may have been able to earn
 students of similar family income who attended public colleges.
 
 
-```{r debt_fees, warning=FALSE, message=FALSE}
+```{r debt_fees, warning=FALSE, message=FALSE,fig.width=10,fig.height=8}
 
 # Net price
 
@@ -388,7 +388,7 @@ The middle plot below shows that the difference still exists but may not be stat
 greater earnings from summer employment by students at the elite private colleges.  Of course, rigorous statistical analysis would
 provide a quantitative result.
 
-```{r redo_debt}
+```{r redo_debt,fig.width=10,fig.height=8}
 
 gplt_debt <- df_debt %>% filter( `Debt Burden ($)` > 0 ) %>%
 {
