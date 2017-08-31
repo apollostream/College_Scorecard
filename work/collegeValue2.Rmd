@@ -3,13 +3,23 @@ title: 'College Scorecard: Earnings Premium & Value Proposition'
 author: "Michael L. Thompson"
 date: "January 2, 2017"
 output: 
+  html_notebook:
+     toc: true
   html_document:
      toc: true
 ---
 
-```{r setup, include=FALSE}
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+library( magrittr )
+library( tidyverse )
+library( RSQLite )
+library( ggplot2 )
+library( formattable )
+library( glmnet )
+
 ```
+
 
 ## Introduction
 
@@ -31,15 +41,6 @@ The adjusted annual earnings is computed by (1) adding the earnings premium  to 
 
 The annual costs are computed across a range of financial need levels: without financial aid and with financial aid corresponding to the household income level (i.e., the net price for the household income level). 
 
-```{r libraries, message=FALSE, warning=FALSE}
-library( magrittr )
-library( tidyverse )
-library( RSQLite )
-library( ggplot2 )
-library( formattable )
-library( glmnet )
-
-```
 
 ## Data Preparation
 
@@ -643,7 +644,7 @@ We now collect the predictions and the earnings premia as determined by the mode
 college.  Any college that does not have a coefficient in the model receives an earnings premium of zero.
 
 
-```{r pred_eprem,warning=FALSE,message=FALSE}
+```{r pred_eprem,warning=FALSE,message=FALSE,fig.width=10,fig.height=8}
 # And, we make predictions for that model using the geometric mean of `lambda.min` and `lambda.1se`..
 glmnet_pred <- glmnet_cv %$% 
   predict(.,newx = model_mat[,setdiff(colnames(model_mat),names(hicor))], #glmdata %>% select(-outcome) %>% as.matrix(), 
@@ -665,14 +666,14 @@ predictions %>%
     ggplot(., aes(x=predicted_earnings,y=outcome)) +
       geom_point() +
       geom_abline(intercept = 0, slope = 1, color = 'red', linetype = 2, size = 1) +
-      geom_text(aes(label = College ), size=2, alpha=0.3 ) +
+      geom_text(aes(label = College ), size=2, check_overlap = TRUE ) +
       ggtitle('Median earnings of students working and not enrolled 6 years after entry') +
       labs(
         x = 'Predicted ($/yr)',
         y = 'Observed ($/yr)'
       )
-  }
-
+  } %>%
+  print()
 
 epremium <- df_coef %>% 
   filter(grepl('^College',Coefficient)) %>% 
