@@ -1,0 +1,3785 @@
+<<<<<<< HEAD:work/collegeValue2.Rmd
+<<<<<<< HEAD:work/collegeValue2.Rmd
+---
+title: 'College Scorecard: Earnings Premium & Value Proposition'
+author: "Michael L. Thompson"
+date: "January 2, 2017"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+  html_notebook:
+    toc: yes
+    toc_depth: 4
+  html_document:
+    toc: yes
+    toc_depth: 4
+always_allow_html: yes
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+library( magrittr )
+library( tidyverse )
+library( RSQLite )
+library( ggplot2 )
+library( formattable )
+library( glmnet )
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+The U.S. Department of Education College Scorecard database is a rich source of information intended to help students and parents understand the true costs of attending college in America.  This script leverages the database to compute an *earnings premium* and a *value proposition* for each college.
+
+**IMPORTANT: This is a quick-and-dirty stab at an analysis that serves as an exploratory data analysis.**
+**It's not a commentary on the actual value represented by a college. Future earnings aren't the sum total of**
+**the value of a college education, and this analysis is too crude to capture the earnings component with the**
+**the rigor and reliability demanded of academic scholarship.**
+
+Think of this analysis as a means of raising questions as the basis for proposing hypotheses to be tested by
+serious academic research.
+
+### Earnings Premium
+**The earnings premium for a college** is *the earnings in excess of the average annual earnings at 6 years after matriculation* after controlling for the following factors:
+
+  (1) the academic abilities of the students at the college, 
+  (2) the academic discipline distribution of Bachelor's degrees of the students graduating from the college, and 
+  (3) the geographic location and campus locale of the university.
+
+Academic ability is measured by SAT. Academic discipline, by percentages of students receiving each type of degree.  And, geographic location, by the region (New England, Mid-East, Southeast, Southwest, Plains, Great Lakes, Rocky Mountains, and Far West) and the locale (City, Suburb, Town, and Rural).
+
+### Value Proposition
+**The value proposition of a college** is defined as *the ratio of the adjusted annual earnings divided by the expected annual costs of attendendance.*  
+
+The adjusted annual earnings is computed by (1) adding the earnings premium  to the overall mean (across all colleges) of annual earnings 6 years after matriculation, and (2) multiplying this sum by the completion rate for the college to adjust for the probability of actually achieving a degree from the college.  
+
+The annual costs are computed across a range of financial need levels: without financial aid and with financial aid corresponding to the household income level (i.e., the net price for the household income level). 
+
+
+## Data Preparation
+
+Load the [kaggle.com version of the U.S. Dept. of Education College Scorecard Dataset](kaggle.com) 
+and generate features for modeling using similar code as used in the previously submitted 
+["Best Colleges for You" script](https://www.kaggle.com/apollostar/d/kaggle/college-scorecard/which-college-is-best-for-you). 
+It uses package `RSQLite` to load the database, and we pare down the database to approximately 900 4-year 
+Bachelor's degree granting colleges.
+
+```{r dataprep, echo = FALSE }
+makeQuery <- function( year, fieldNames, dfNames ){
+  # The fields not included in `fieldNames`, other than "Year", should have the same value regardless of year.
+  paste(
+    "SELECT UNITID unitID,
+INSTNM College,
+CONTROL CollegeType,
+PREDDEG degree,
+CURROPER currop,
+DISTANCEONLY distance,
+RELAFFIL relaffil,
+st_fips state,
+region region,
+LOCALE locale,
+CCBASIC ccbasic,
+Year Year,",
+paste( fieldNames,' ',dfNames,sep="",collapse = ","),
+"FROM Scorecard
+WHERE Year=",year
+  )
+}
+
+fieldNames <-
+  c(
+    'UGDS',
+    "pell_ever",
+    "fsend_1","fsend_2","fsend_3","fsend_4","fsend_5",
+    "COSTT4_A",
+    "NPT4_PUB","NPT4_PRIV","NPT41_PUB","NPT42_PUB","NPT43_PUB","NPT44_PUB","NPT45_PUB",
+    "NPT41_PRIV","NPT42_PRIV","NPT43_PRIV","NPT44_PRIV","NPT45_PRIV",
+    "TUITIONFEE_IN","TUITIONFEE_OUT",
+    "PCTPELL",
+    "SATVR25","SATVR75","SATMT25","SATMT75","SATVRMID","SATMTMID","SATWRMID","SAT_AVG","SAT_AVG_ALL",
+    "C150_4_POOLED_SUPP",
+    "md_earn_wne_p6","md_earn_wne_p8","md_earn_wne_p10"
+  )
+
+# Upper case variables are from 2013 and lower case variables are from the
+# Treasury dataset of 2005, except 'region'. 
+
+fromS11 <- which(fieldNames %in% grep('^[A-Z]|region',fieldNames))
+fromS05 <- setdiff(seq_along(fieldNames),fromS11)
+
+# put a 'Treasury_' prefix on the Treasury variables.
+dfNames <- ifelse(grepl('^[A-Z]|region',fieldNames),fieldNames,paste("Treasury",fieldNames,sep="_"))
+discgrp <- data_frame(
+  LABEL=c("Agriculture, Agriculture Operations, and Related Sciences",
+          "Natural Resources and Conservation",
+          "Architecture and Related Services",
+          "Area, Ethnic, Cultural, Gender, and Group Studies",
+          "Communication, Journalism, and Related Programs",
+          "Communications Technologies/Technicians and Support Services",
+          "Computer and Information Sciences and Support Services",
+          "Personal and Culinary Services",
+          "Education",
+          "Engineering",
+          "Engineering Technologies and Engineering-Related Fields",
+          "Foreign Languages, Literatures, and Linguistics",
+          "Family and Consumer Sciences/Human Sciences",
+          "Legal Professions and Studies",
+          "English Language and Literature/Letters",
+          "Liberal Arts and Sciences, General Studies and Humanities",
+          "Library Science",
+          "Biological and Biomedical Sciences",
+          "Mathematics and Statistics",
+          "Military Technologies and Applied Sciences",
+          "Multi/Interdisciplinary Studies",
+          "Parks, Recreation, Leisure, and Fitness Studies",
+          "Philosophy and Religious Studies",
+          "Theology and Religious Vocations",
+          "Physical Sciences",
+          "Science Technologies/Technicians","Psychology",
+          "Homeland Security, Law Enforcement, Firefighting and Related Protective Services",
+          "Public Administration and Social Service Professions","Social Sciences",
+          "Construction Trades",
+          "Mechanic and Repair Technologies/Technicians",
+          "Precision Production",
+          "Transportation and Materials Moving",
+          "Visual and Performing Arts",
+          "Health Professions and Related Programs",
+          "Business, Management, Marketing, and Related Support Services",
+          "History"),
+  discgrp=c(2,4,2,5,6,4,1,4,5,1,1,5,5,7,5,5,5,2,1,4,5,4,5,5,2,3,3,4,3,3,4,4,4,4,6,2,7,5),
+  VARIABLE.NAME=c("PCIP01","PCIP03","PCIP04","PCIP05","PCIP09","PCIP10","PCIP11","PCIP12","PCIP13",
+                  "PCIP14","PCIP15","PCIP16","PCIP19","PCIP22","PCIP23","PCIP24","PCIP25","PCIP26",
+                  "PCIP27","PCIP29","PCIP30","PCIP31","PCIP38","PCIP39","PCIP40","PCIP41","PCIP42",
+                  "PCIP43","PCIP44","PCIP45","PCIP46","PCIP47","PCIP48","PCIP49","PCIP50","PCIP51",
+                  "PCIP52","PCIP54")
+)
+discNames <- gsub('^([A-Z][-a-z]+)[, and/]*([A-Z][a-z]+).*','\\1\\2',discgrp$LABEL)
+discgrp %<>% tbl_df %>% mutate(discName = discNames)
+
+# Connect to the database.
+db <- dbConnect( dbDriver("SQLite"), "../input/database.sqlite" )
+tables <- dbGetQuery( db, "SELECT Name FROM sqlite_master WHERE type='table'" )
+print.table( tables ) # (tables %>% head(1) %>% head(1)) == "Scorecard"
+allfields <- dbListFields( db, tables[[1]][1] ) 
+#print( setdiff( fieldNames, allfields ) )
+
+# Get discipline distribution data.
+queryStringDscplns <- makeQuery( 2003, discgrp$VARIABLE.NAME, discNames )
+disciplines2003 <- dbGetQuery( db, queryStringDscplns ) %>% 
+  tbl_df() %>% 
+  mutate_at( funs(as.numeric), .vars=vars(one_of(discNames)) ) 
+queryStringDscplns <- makeQuery( 2005, discgrp$VARIABLE.NAME, discNames )
+disciplines2005 <- dbGetQuery( db, queryStringDscplns ) %>% 
+  tbl_df() %>% 
+  mutate_at( funs(as.numeric), .vars=vars(one_of(discNames)) ) 
+# queryStringDscplns <- makeQuery( 2012, discgrp$VARIABLE.NAME, discNames )
+# disciplines2012 <- dbGetQuery( db, queryStringDscplns ) %>% 
+#   tbl_df() %>% 
+#   mutate_each( funs(as.numeric), one_of(discNames) ) 
+queryStringDscplns <- makeQuery( 2013, discgrp$VARIABLE.NAME, discNames )
+disciplines2013 <- dbGetQuery( db, queryStringDscplns ) %>% 
+  tbl_df() %>% 
+  mutate_at( funs(as.numeric), .vars=vars(one_of(discNames)) ) 
+#disciplines2013 %>% select(20:25) %>% print()
+
+# Get Treasury data about students' families.
+queryString2003    <- makeQuery( 2003, fieldNames, dfNames )
+student2003 <- dbGetQuery(db,queryString2003) %>% tbl_df()
+student2003 %<>% select_if( function(col) !all(is.na(col)) ) #%T>% print()
+# Get Treasury data about students' families.
+queryString2005    <- makeQuery( 2005, fieldNames, dfNames )
+student2005 <- dbGetQuery(db,queryString2005) %>% tbl_df()
+student2005 %<>% select_if( function(col) !all(is.na(col)) ) #%T>% print()
+# # Get Treasury data about students' families.
+# queryString2012    <- makeQuery( 2012, fieldNames, dfNames )
+# student2012 <- dbGetQuery(db,queryString2012) %>% tbl_df()
+# student2012 %<>% select_if( function(col) !all(is.na(col)) ) #%T>% print()
+
+# Get latest college/student attribute data.
+queryString2013    <- makeQuery( 2013, fieldNames, dfNames )
+student2013 <- dbGetQuery(db,queryString2013) %>% tbl_df()
+student2013 %<>% select_if( function(col) !all(is.na(col)) ) #%T>% print()
+
+# Disconnect from the database.
+dbDisconnect( db )
+
+
+# Now join the data.tables together to make a single one.
+student <- student2013 %>% select( unitID, everything() ) %>%
+  left_join( disciplines2013 %>% select(unitID, one_of(setdiff(names(disciplines2013),names(student2013)))), by = 'unitID' ) %>%
+  bind_rows( 
+    student2003 %>% select( unitID, everything() ) %>% 
+      left_join( disciplines2003 %>% select(unitID, one_of(setdiff(names(disciplines2003),names(student2003)))), by = 'unitID' ),
+    student2005 %>% select( unitID, everything() ) %>% 
+      left_join( disciplines2005 %>% select(unitID, one_of(setdiff(names(disciplines2005),names(student2005)))), by = 'unitID' )#,
+    # student2012 %>% select( unitID, everything() ) %>% 
+    #   left_join( disciplines2012 %>% select(unitID, one_of(setdiff(names(disciplines2012),names(student2012)))), by = 'unitID' )
+  )
+
+# rm( student2003, disciplines2003, student2005, disciplines2005, student2013)#, student2012, disciplines2012 )
+
+# Turn character columns into factors.
+makeNumsFactors <- function(df){
+  df %>% lapply(
+    function(x) 
+      if(all(grepl('^[-0-9.]+$',x[!is.na(x)]))){
+        as.numeric(x)
+      } else {
+        if(is.character(x) | is.factor(x) | is.logical(x)) {
+          if('PrivacySuppressed' %in% x) {
+            tmp<-x;tmp[x=='PrivacySuppressed']<-NA;as.numeric(tmp)
+          } else {
+            factor(gsub("â€™","'",x))
+          }
+        } else as.numeric(x)
+      }
+  ) %>% 
+    as.data.frame %>% tbl_df
+}
+
+# 
+# Now add the disciplines as grouped
+#student %<>% inner_join( disciplines2013 %>% select( unitID, one_of(setdiff(names(.),names(student))) ), by='unitID' )
+#rm( disciplines2013 )
+
+usa.states.dc <- c("District of Columbia",state.name)
+# Filter down to just the colleges meeting the following criteria:
+student %<>% 
+  mutate(
+    SAT_25=SATVR25+SATMT25,
+    SAT_75=SATVR75+SATMT75
+  ) %>%
+  filter(
+    !grepl('MCPHS Un',College),
+    CollegeType != 'Private for-profit',
+    !is.na(UGDS),
+    UGDS > 0,
+    !is.na(SAT_25), !is.na(SAT_75), !is.na(SAT_AVG),
+    (Year != 2013 & Treasury_md_earn_wne_p6 > 0) | Year == 2013, 
+    currop      == 'Currently certified as operating',
+    degree      == "Predominantly bachelor's-degree granting",
+    as.character(region)      != 'U.S. Service Schools',
+    !grepl('^Associate',ccbasic),
+    state %in% usa.states.dc #,
+#    distance    == 'Not distance-education only',
+   # !is.na(ccbasic),
+    #!is.na(pell_ever),
+   # !grepl('^Special Focus.+Theological',ccbasic)#, #!isTheological,
+    #!is.na(md_earn_wne_p6)
+  ) %>%
+  mutate_at( funs(ifelse(is.na(.),Treasury_md_earn_wne_p6,.)), .vars=vars(starts_with('Treasury_mn_earn_wne_')) )
+
+student %<>% makeNumsFactors()
+
+# Find the common colleges across all three years and make sure the College name
+# is the same as that used in year 2013.
+unitIDs <- ( (student %>% filter(Year==2003))$unitID ) %>%
+  intersect( (student %>% filter(Year==2005))$unitID ) %>%
+  intersect( (student %>% filter(Year==2013))$unitID ) %>% sort()
+colleges <- student %>% 
+  filter(Year==2013, unitID %in% unitIDs ) %>% 
+  arrange(unitID) %$% 
+  { as.character(College) } %>% 
+  setNames( paste0('u_',unitIDs ) )
+
+```
+
+```{r student_do1,message=FALSE,warning=FALSE,results='hide'}
+student %<>% 
+  filter( unitID %in% unitIDs ) %>% 
+  select( -contains('SATWR') ) %>%
+  group_by(Year) %>% 
+  arrange(unitID) %>%
+  do( (.) %>% mutate(College = colleges[paste0('u_',unitID )]) ) %>%
+  ungroup()
+
+
+# # add an indicator variable for presence of at least one standardized test score statistic:
+# a<- student %>% dplyr::select(matches('^(SAT|ACT)')) %>%  apply(1,function(x) !all(is.na(x)))
+# student %<>% mutate(stdzdtest=a)
+
+
+```
+
+### Feature Engineering: Bayes Factors
+Approximate Bayes factors serve as the features of the model. The Bayes factor is the ratio of the posterior-odds of the hypothesis (i.e., after receiving the evidence) to the prior-odds of the hypothesis (i.e., before seeing the evidence).  The evidence in this case is the attribute of a student. For example, "SAT score greater than 1400".  And the hypothesis is attendance at the college. 
+
+(There may not be a compelling reason to do this, but informal testing in other applications indicates a greater ability to distinguish amongst the colleges in the Bayes factors feature space than in the raw variable space.)
+
+Compute the following for the feature corresponding to attribute `Attribute_Y` for each college of interest `College_X` (we use log-base 10 on the Bayes factor.):
+
+`BF_log10( hypothesis = College_X | evidence = Attribute_Y )` 
+`= log10( Odds( hypothesis = College_X | evidence = Attribute_Y )/Odds( hypothesis = College_X ) )`
+`= log10( P( evidence = Attribute_Y | hypothesis = College_X )/P( evidence = Attribute_Y | hypothesis = NOT(College_X) ))`
+`~ log10( P( evidence = Attribute_Y | hypothesis = College_X )/P( evidence = Attribute_Y )`
+
+The final approximation is a good one because there are 900 colleges in our working set; so the students attending `College_X` are a very small proportion of the entire American student population. Therefore, the probability of finding a student with `Attribute_Y` amongst students *not* at `College_X` is basically the same as finding such a student amongst the entire student population (`College_X` included).
+
+Above, the flip in the propositions on each side of the conditional ("|") when we go from `Odds(H|E)` to probabilities, `P(E|H)`, occurs by applying Bayes' Rule.
+
+#### Estimating the Probabilities
+For some of the probabilities used in approximating the Bayes factors, the probabilities `P( evidence = Attribute_Y | hypothesis = College_X )` are simply the reported proportions in the database. 
+
+But, the main challenge in using Bayes factors as features is computing the final probabilities for attributes for which only moments and quantiles are reported in the database. For such attributes, we first approximate a full probability distribution of students at the college of interest and then apply the proposition. 
+
+Take SAT for example. We are given the mean, median and quartiles for SAT scores of students at each college.  For each college, we fit a model to these values to approximate the continuous distribution of SAT scores of students at the college.  Then, for an attribute such as `Attribute_Y` = "SAT score greater than 1400", we compute `P( evidence = Attribute_Y | hypothesis = College_X )` by simply computing the upper tail probability of SAT with lower limit 1400.  Finally, to compute `P( evidence = Attribute_Y )`, we simply take the weighted average, across all colleges, of the previously calculated conditional probability, where the weighting is simply the proportion of students attending `College_X` amongst all students in our 1100+ college universe. In the database, field `UGDS` is the number of undergraduate students attending the college. So the proportion of all students attending `College_X` is `P( hypothesis = College_X ) = UGDS[College_X]/sum( UGDS[College_X] )`.
+
+For attributes like region and locale, to estimate `P( evidence = Attribute_Y | hypothesis = College_X )`, we define `Attribute_Y` to reflect preference.  So, for, say `Region == 'Great Lakes'`, `Attribute_Y` is "prefers attending college in Great Lakes region".  And, we use our own subjective knowledge to just assume that of the students attending a college in a specific region (or locale), a non-zero proportion of them preferring attending colleges an alternative region (or locale) and that the alternative regions (locales) that are more similar to the one in which the college exists would have a higher proportion of such students than alternatives that are less similar. For regions, similarity is determined by distance -- e.g., Mid-East is more similar to Great Lakes than is Far West. For locales, similarity is determined by character -- i.e., campuses in suburbs of large cities are more similar to those in large cities than are remote rural campuses.
+
+```{r features, echo=FALSE}
+
+#===================================================
+  ### Academics: Completion rates, admissions rates and SAT scores.
+  # Took a look at scaled test scores, but ultimately settled upon the log-normal
+  # fits to SATs below.
+  academics <- student %>% #filter( Year == 2013 ) %>%
+    dplyr::select(Year,unitID,College,UGDS,C150_4_POOLED_SUPP,SAT_25,SAT_AVG,SAT_75,one_of(discNames))
+  
+  
+  # Clumsily fit log-normal distributions to the SAT score quartiles for each school.
+  fr <- function(x,SAT_AVG,SAT_25,SAT_75,probs=c(0.25,0.75)) {
+    sdl <- x[1]
+    q <- qlnorm(p=probs,meanlog=log(SAT_AVG) - sdl^2/2,sdlog=sdl)
+    log(SAT_25/q[1])^2 + log(SAT_75/q[2])^2
+  }
+  getMuSd <- function(SAT_AVG,SAT_25,SAT_75) {
+    probs  <- c(0.25,0.75)
+    SAT_AVG0 <- SAT_AVG
+    if(SAT_75==1600) {
+      probs   <- probs/(0.75+1.0E-5)
+      SAT_AVG <- (SAT_AVG0 - 1600*(1-(0.75+1.0E-5)))/(0.75+1.0E-5)
+    }
+    soln <- optim(c(0.05), fr,lower=1.0E-3,upper=0.2,method='L-BFGS-B',
+                  SAT_AVG=SAT_AVG,SAT_25=SAT_25,SAT_75=SAT_75,probs=probs)
+    sdl  <- soln$par
+    meanlog  <- log(SAT_AVG) - sdl^2/2
+    pSAT_AVG <- exp(meanlog+0.5*sdl^2)
+    q   <- qlnorm(p=probs,meanlog=meanlog,sdlog=sdl)
+    if(SAT_75==1600){
+      pSAT_AVG <- pSAT_AVG*(0.75+1.0E-5) + 1600*(1-(0.75+1.0E-5))
+    }
+    return(c(meanlog=meanlog,sdlog=sdl,pSAT_25=q[1],pSAT_AVG=pSAT_AVG,pSAT_75=q[2]))
+  }
+  
+  # Get the log-normal parameters of the SAT distribution for each school
+  academics <- academics %$% {bind_cols(.,as.data.frame(t(mapply(getMuSd,SAT_AVG,SAT_25,SAT_75))))}
+  academics %>% 
+    filter(Year==2013,grepl('Harvard|Cal.+Inst.+Tech|Mass.+Inst.+Tech|Princeton U|Northwestern U|Cornell U',College)) %>% 
+    arrange(desc(SAT_AVG)) %>%
+    formattable() %>%
+    as.datatable()
+  
+  # Discretize the SAT distributions
+  academics %<>%
+    #filter(!is.na(C150_4_POOLED_SUPP)) %>%
+    mutate(probSchool = UGDS/sum(UGDS),
+           # 20160315: MLT #
+           logPadmit_le800        = plnorm( 800, meanlog, sdlog, log.p = TRUE),
+           logPadmit_gt800le1000  = plnorm(1000, meanlog, sdlog, log.p = TRUE),
+           logPadmit_gt1000le1200 = plnorm(1200, meanlog, sdlog, log.p = TRUE),
+           logPadmit_gt1200le1400 = plnorm(1400, meanlog, sdlog, log.p = TRUE),
+           logPadmit_gt1400       = 0,
+           
+           p_le800        = plnorm( 800,meanlog,sdlog),
+           p_gt800le1000  = plnorm(1000,meanlog,sdlog) - p_le800,
+           p_gt1000le1200 = plnorm(1200,meanlog,sdlog) - plnorm(1000,meanlog,sdlog),
+           p_gt1200le1400 = plnorm(1400,meanlog,sdlog) - plnorm(1200,meanlog,sdlog),
+           p_gt1400       = plnorm(1400,meanlog,sdlog,lower.tail=FALSE),
+           totprob        = p_le800 + p_gt800le1000 + p_gt1000le1200 + p_gt1200le1400 + p_gt1400)
+  
+
+  # Compute Bayes Factors for the discretized SAT score distributions of each school
+  makeBF <- function(x) ifelse(x<=0,-5,log10(x/sum(x*academics$probSchool,na.rm=TRUE))) # Approximate
+  academicsBF <- academics %>% 
+    select(matches('BF_SAT|log|prob|^p_'),one_of(discNames))  %>%
+    lapply(function(x) ifelse(x<=0,log10(1.0E-5),log10(x/sum(x*academics$probSchool,na.rm=TRUE)))) %>%
+    as_data_frame() %>% 
+    setNames(gsub("^p_","SAT_",names(.))) %>%
+    setNames(paste0('BF_',names(.))) %>%
+    bind_cols( academics %>% select(-matches('BF_SAT|log|prob|^p_'),-one_of(discNames)) )
+
+  disciplines <- academics %>% select(one_of(discNames))
+  dominant_discipline <- academics %>% 
+    select(College,unitID,Year,one_of(discNames)) %>% 
+    rowwise() %>% 
+    do( 
+      {
+        discipline <- unlist((.)[-(1:3)]) %>% which.max() %>% names()
+        dd_pct <- (.)[[discipline]]
+        discipline <- ( if( dd_pct > 0.3 ) { discipline } else { '*None*' } )
+        as_data_frame( c((.)[1:3],list(dominant_discipline=discipline, dd_pct=dd_pct )) )
+      }
+    )
+  discEntropy <- data_frame(
+    discBreadth = rowSums(-(disciplines * log(disciplines)),na.rm = TRUE),
+    Year   = academics$Year,
+    unitID = academics$unitID
+  ) %>% 
+    mutate(BF_discBreadth = discBreadth - median(discBreadth))
+  
+  academicsBF %<>% inner_join(discEntropy,by=c('Year','unitID'))
+
+
+  ### College Setting: locale & region.
+  localeNames <- sort(unique(as.character(student$locale)))
+  localeAggregates <- setNames(c(gsub('([^ ]+) ([^ ]+).+','\\1\\2',localeNames[1:3]),
+                                 rep('Rural',3),
+                                 gsub('([^ ]+) ([^ ]+).+','\\1\\2',localeNames[7]),
+                                 rep('Suburb:Small/Midsize & Town:Fringe',2),
+                                 gsub('([^ ]+) ([^ ]+).+','\\1\\2',localeNames[10]),
+                                 'Suburb:Small/Midsize & Town:Fringe',
+                                 gsub('([^ ]+) ([^ ]+).+','\\1\\2',localeNames[12])),localeNames)
+```
+
+```{r student_do2,message=FALSE,warning=FALSE,results='hide', echo=FALSE}
+  student %<>% 
+    group_by( unitID ) %>%
+    do(
+      (.) %>% mutate(locale = locale[!is.na(locale)][[1]])
+    ) %>%
+    ungroup() %>%
+    mutate(localeAgg = factor(localeAggregates[as.character(locale)],
+                              levels=c('Rural','Town:Remote','Town:Distant','Suburb:Small/Midsize & Town:Fringe',
+                                       'Suburb:Large','City:Small','City:Midsize','City:Large')))
+```
+
+```{r continue, echo=FALSE}
+  makeBF <- function(x) {x <- 1.0E-9 + x;log10(x/sum(x*settingBF$probSchool,na.rm=TRUE))} # Approximate
+  settingBF <- student %>% 
+    dplyr::select(Year,unitID,College,UGDS,localeAgg,region) %>%
+    mutate(probSchool = UGDS/sum(UGDS))
+  a <- settingBF %$% model.matrix(~localeAgg - 1,data=.)
+  localeColNames <- gsub('^([^:]+):*(.+)$','BF_\\1\\2',colnames(a))
+  colnames(a) <- localeColNames
+  locAbbr <- gsub('^.+Agg(.{4}).+','\\1',colnames(a))
+  
+  # Define similarity factors: This is a subjective probability (based on my opinion) determining how likely a student would attend college in
+  # a locale (col) other than his/her most-preferred locale (row).  So each row sums to 1.
+  fctr <- matrix(c(     1,  0.8, 0.01, 0.0001,
+                      0.8,    1, 0.7 ,   0.01,
+                     0.01,  0.7,    1,    0.8,
+                   0.0001, 0.01,  0.8,      1)/2,nrow=4,ncol=4,byrow=TRUE, 
+                 dimnames=list(key=c('Rura','Town','Subu','City'), other=c('Rura','Town','Subu','City')))
+  # Expand factors to cover all locales.
+  fctr <- fctr[locAbbr,locAbbr]
+  fctr[row(fctr) == col(fctr)] <- 1 # put ones on the diagonal
+  dimnames(fctr) <- list(localeColNames,localeColNames)
+  
+  # Here's a "flattening" transformation so that similarities are essentially
+  # increased (since all elements of fctr are <= 1.)
+  fctr %<>% sqrt 
+  fctr <- fctr / rowSums(fctr)
+  
+  # Reweight the local indicators.
+  a <- a %*% fctr
+  # Convert locale indicators intor psuedo-Bayes factors.
+  a %<>% as.data.frame %>% tbl_df %>% mutate_all(funs(makeBF))
+  
+  
+  settingBF %<>% dplyr::select(-localeAgg) %>% bind_cols(a)
+  
+  #regNames <- c('FarWest','GreatLakes','MidEast','NewEngland','Plains','RockyMountains','Southeast','Southwest')
+  a <- settingBF %>%
+    mutate(regionName = factor(gsub(' ','',as.character(student$region)))) %$% 
+    model.matrix(~regionName - 1,data=.)
+  # Define similarity factors
+  fctrRegion <- matrix(c(1, 0.03, 0.0, 0.0, 0.1, 0.3, 0.0, 0.3,
+                         0.03, 1, 0.3, 0.1, 0.3, 0.1, 0.03, 0.03,
+                         0.0, 0.3, 1,  0.3, 0.01, 0.0, 0.1, 0.0,
+                         0.0, 0.1, 0.3, 1, 0.0, 0.0, 0.0, 0.0,
+                         0.1, 0.3, 0.01, 0.0, 1, 0.3, 0.1, 0.1,
+                         0.3, 0.1, 0.0, 0.0, 0.3, 1, 0.0, 0.3,
+                         0.0, 0.03, 0.1, 0.0, 0.1, 0.0, 1, 0.3,
+                         0.3,0.03, 0.0, 0.0, 0.1, 0.3, 0.3, 1),nrow=8,ncol=8,byrow=TRUE,
+                       dimnames=list(colnames(a),colnames(a)))
+  a <- a %*% fctrRegion
+  colnames(a) <- gsub('^regionName','BF_',colnames(a))
+  a %<>% as.data.frame %>% tbl_df %>% mutate_all(funs(makeBF))
+  settingBF %<>% dplyr::select(-region) %>% bind_cols(a)
+
+  ### Student Aid:
+  aid <- student %>% 
+    dplyr::select(Year,unitID,College,UGDS,matches("pell_ever|fsend")) %>%
+    group_by( unitID ) %>%
+    do(
+      (.) %>% mutate_at(funs(ifelse(is.na(.),(.)[!is.na(.)][[1]],.)),.vars=vars(matches("pell_ever|fsend")))
+    ) %>%
+    ungroup() %>%
+    mutate(probSchool = UGDS/sum(UGDS),
+           totprob    = rowSums(as.matrix(.[grepl('fsend',names(.))])))
+  #aid %>% print(n=20)
+  makeBF <- function(x) {x <- 1.0E-9 + x;log10(x/sum(x*aid$probSchool,na.rm=TRUE))} # Approximate
+  aidBF <- aid %>% 
+    dplyr::select(matches("pell_ever|fsend")) %>% 
+    mutate_all(funs(makeBF)) %>% 
+    setNames(paste0("BF_",names(.))) %$%
+    bind_cols(aid %>% dplyr::select(-matches("pell_ever|fsend")),.)
+  
+    
+  # Now combine them all together to form the features data.table.
+  studentBF <-   
+    student %>% select(
+      Year,unitID,College,CollegeType,state,UGDS,C150_4_POOLED_SUPP,TUITIONFEE_IN,TUITIONFEE_OUT,COSTT4_A,
+      contains('md_earn_wne_p6')
+      ) %>%
+    inner_join(settingBF   %>% select(-College,-UGDS,-probSchool), by=c('Year','unitID')) %>%
+    inner_join(academicsBF %>% select(-College,-UGDS,-C150_4_POOLED_SUPP), by=c('Year','unitID')) %>%
+    inner_join(aidBF       %>% select(-College,-UGDS), by=c('Year','unitID')) %>%
+    mutate(BF_prior = log10(nrow(.)*UGDS/sum(UGDS)))
+  # Add interactions...
+  studentBF %<>% 
+    mutate_at(funs(10^(.)), .vars=vars(starts_with('BF'))) %>% 
+    rename( outcome = Treasury_md_earn_wne_p6) %>%
+    mutate( Year2003 = ifelse(Year==2003,1,0)) %>%
+    mutate( Living_Expenses = COSTT4_A - TUITIONFEE_IN ) %>%
+    mutate( Living_Expenses = (Living_Expenses - mean(Living_Expenses,na.rm=TRUE))/sd(Living_Expenses,na.rm=TRUE)) %>%
+    mutate( topSAT2 = (BF_SAT_gt1400-mean(BF_SAT_gt1400))^2, bottomSAT2 = (BF_SAT_le800-mean(BF_SAT_le800))^2, pell2 = (BF_Treasury_pell_ever-mean(BF_Treasury_pell_ever))^2, 
+            prior2 = (BF_prior-mean(BF_prior,na.rm=TRUE))^2,
+            breadth_health  = -(BF_discBreadth - mean(BF_discBreadth))*(BF_HealthProfessions-mean(BF_HealthProfessions,na.rm=TRUE)),
+            breadth_arts    = -(BF_discBreadth - mean(BF_discBreadth))*(BF_VisualPerforming-mean(BF_VisualPerforming,na.rm=TRUE)),
+            breadth_engg    = -(BF_discBreadth - mean(BF_discBreadth))*(BF_Engineering-mean(BF_Engineering,na.rm=TRUE)),
+            breadth_busmgmt = -(BF_discBreadth - mean(BF_discBreadth))*(BF_BusinessManagement-mean(BF_BusinessManagement,na.rm=TRUE)),
+            breadth_libarts = -(BF_discBreadth - mean(BF_discBreadth))*(BF_LiberalArts-mean(BF_LiberalArts,na.rm=TRUE)),
+            breadth_bio     = -(BF_discBreadth - mean(BF_discBreadth))*(BF_BiologicalBiomedical-mean(BF_BiologicalBiomedical,na.rm=TRUE)),
+            breadth_socsci  = -(BF_discBreadth - mean(BF_discBreadth))*(BF_SocialSciences-mean(BF_SocialSciences,na.rm=TRUE)),
+            breadth_edu     = -(BF_discBreadth - mean(BF_discBreadth))*(BF_Education-mean(BF_Education,na.rm=TRUE)),
+            breadth_eng     = -(BF_discBreadth - mean(BF_discBreadth))*(BF_EnglishLanguage-mean(BF_EnglishLanguage,na.rm=TRUE)),
+            breadth_psych   = -(BF_discBreadth - mean(BF_discBreadth))*(BF_Psychology-mean(BF_Psychology,na.rm=TRUE)),
+            breadth_prks    = -(BF_discBreadth - mean(BF_discBreadth))*(BF_ParksRecreation-mean(BF_ParksRecreation,na.rm=TRUE)),
+            breadth_hmsec   = -(BF_discBreadth - mean(BF_discBreadth))*(BF_HomelandSecurity-mean(BF_HomelandSecurity,na.rm=TRUE))
+    ) 
+```
+
+## Earnings Premium and Value Proposition Calculation
+A true "earnings premium"" cannot be reliably computed from this dataset because we only have earnings data for years 2003 and 2005 years, and all manner of factors are obscured by the way the data are aggregated and the noisiness of values. 
+
+Package `glmnet` is used to estimate a model, including the discrete factor `College_ID` as a fixed effect.  For those
+colleges with a corresponding coefficient included in the model, we use the estimated coefficient as the earnings premium. Many of the colleges drop out of the model. So, as you'll see below, the histogram of earnings premiums looks like a mixture of a spike at zero and a broad normal distribution with tails stretching away from zero in either direction.
+
+### Model to Predict Expected Earnings
+
+First, we use package `glmnet` to fit the model to the median earnings at 6-years after matriculation.
+
+After defining `covariates`, a character vector of the covariate names, we computed the correlation matrix of the columns
+in `studentBF`.  Subsets of the columns were defined by a single multi-valued variable, e.g., `region`, so there's lots
+of collinearity and some pure confounding of interactions with main effects and other interactions. So, we pruned the covariate vector based on a heuristic screening of highly correlated terms in the `model.matrix`.
+
+```{r model,fig.height=8,fig.width=10}
+covariates <- c(
+  "Year2003",
+  "BF_localeAggRural",
+  #"BF_localeAggTownRemote",
+  #"BF_localeAggTownDistant",
+  #"BF_localeAggSuburbSmall/Midsize & Town:Fringe","BF_localeAggSuburbLarge",
+  "BF_localeAggCitySmall",
+  #"BF_localeAggCityMidsize",
+  "BF_localeAggCityLarge",
+  "BF_FarWest(AK,CA,HI,NV,OR,WA)",
+  "BF_GreatLakes(IL,IN,MI,OH,WI)",
+  "BF_MidEast(DE,DC,MD,NJ,NY,PA)",
+  #"BF_NewEngland(CT,ME,MA,NH,RI,VT)",
+  "BF_Plains(IA,KS,MN,MO,NE,ND,SD)",
+  #"BF_RockyMountains(CO,ID,MT,UT,WY)",
+  "BF_Southeast(AL,AR,FL,GA,KY,LA,MS,NC,SC,TN,VA,WV)",
+  "BF_Southwest(AZ,NM,OK,TX)",
+  "BF_SAT_le800",
+  #"BF_SAT_gt800le1000",
+  "BF_SAT_gt1000le1200","BF_SAT_gt1200le1400",
+  "BF_SAT_gt1400",
+  "BF_AgricultureAgriculture",
+  "BF_NaturalResources","BF_ArchitectureRelated",
+  "BF_AreaEthnic","BF_CommunicationJournalism",
+  "BF_CommunicationsTechnologies","BF_ComputerInformation",
+  "BF_PersonalCulinary","BF_Education",
+  "BF_Engineering","BF_EngineeringTechnologies",
+  "BF_ForeignLanguages","BF_FamilyConsumer",
+  "BF_LegalProfessions","BF_EnglishLanguage",
+  "BF_LiberalArts","BF_LibraryScience",
+  "BF_BiologicalBiomedical","BF_MathematicsStatistics",
+  #"BF_MilitaryTechnologies",
+  "BF_MultiInterdisciplinary",
+  "BF_ParksRecreation","BF_PhilosophyReligious",
+  "BF_TheologyReligious","BF_PhysicalSciences",
+  "BF_ScienceTechnologies","BF_Psychology",
+  "BF_HomelandSecurity","BF_PublicAdministration",
+  "BF_SocialSciences","BF_ConstructionTrades",
+  "BF_MechanicRepair","BF_PrecisionProduction",
+  "BF_TransportationMaterials","BF_VisualPerforming",
+  "BF_HealthProfessions","BF_BusinessManagement",
+  "BF_History",
+  "College_ID"
+  #"BF_discBreadth",
+  #"Living_Expenses",
+  #"topSAT2","bottomSAT2"#,
+  # "breadth_health","breadth_arts",
+  # "breadth_engg","breadth_busmgmt",
+  # "breadth_libarts","breadth_bio",
+  # "breadth_socsci","breadth_edu",
+  # "breadth_eng","breadth_psych",
+  # "breadth_prks","breadth_hmsec"
+)
+
+# formula_string <- paste0(
+#   'outcome ~ (.)^2 + ',
+#   paste(sprintf('poly(BF_%s,2)',setdiff(discNames,"MilitaryTechnologies")), collapse="+")
+# )
+#formula_string <- 'outcome ~ (.-College_ID)^2 + College_ID'
+glmdata   <- studentBF %>% 
+  mutate(College_ID = paste(unitID,College,sep="__")) %>% 
+  select(outcome, one_of(covariates) ) %>% 
+  filter(complete.cases(.))
+
+# Try a model with `College` as a fixed effect; and prune out a bunch of correlated stuff.
+model_mat <- model.matrix( outcome ~ (.-College_ID)^2 + College_ID, data=glmdata )
+fcor      <- cor(model_mat[,-1]) - diag(ncol(model_mat)-1)
+nms       <- colnames(fcor)
+hicor     <- nms %>% 
+  sapply(
+    function(nm) {
+      # scan the upper triangle of the correlation matrxi...
+      ihi<-which(abs(fcor[seq_len(which(nms==nm)),nm])>0.8)
+      setNames(fcor[ihi,nm],nms[ihi])
+    } 
+  )
+hicor     <- hicor[sapply(hicor,length)>0]
+
+# Since we know that some of the interactions are confounded with each other and with some main effects,
+# which causes the cross-validation error to blow up, we'll find the models that have fewer terms than
+# those that blow up and plot the cross-validation mean-squared error for them.
+# Range of `lambda` determined by trial and error.
+set.seed( 2393 )
+glmnet_cv <- cv.glmnet(
+  model_mat[,setdiff(colnames(model_mat),names(hicor))], #glmdata %>% select(-outcome) %>% as.matrix(),
+  glmdata %>% select(outcome) %>% as.matrix(),
+  family='gaussian',
+  lambda = exp(seq(log(10),log(100),length.out = 50))
+)
+plot( glmnet_cv )
+
+# # These are the non-zero coefficients for the model using `lambda.1se`.
+# acv %>% coef() %>% {(.)[abs((.)[,1])>0,1]} %>% print()
+# # These are the non-zero coefficients for the model using `lambda.min`.
+# acv %>% coef(s='lambda.min') %>% {(.)[abs((.)[,1])>0,1]} %>% print()
+# These are the non-zero coefficients for the model using the geometric mean of `lambda.min` and `lambda.1se`.
+df_coef <- glmnet_cv %$% 
+  coef(.,s=exp(mean(log(c(lambda.1se,lambda.min))))) %>% 
+  { (.)[abs((.)[,1])>0,1] } %>%
+  { data_frame(Coefficient = names(.), `$/util` = round(.,0)) } 
+df_coef %>%
+  formattable() %>%
+  as.datatable()
+
+
+
+# We use that latter model.
+# It's intercept serves as the grand-mean, i.e., expected earnings of a college after controlling for the covariates
+# and before adding the college's earnings premium.
+Expected_Earnings <- glmnet_cv %$% coef(.,s=exp(mean(log(c(lambda.1se,lambda.min)))))['(Intercept)',]
+print( Expected_Earnings )
+
+```
+
+We now collect the predictions and the earnings premia as determined by the model coefficient for the corresponding
+college.  Any college that does not have a coefficient in the model receives an earnings premium of zero.
+
+
+```{r pred_eprem,warning=FALSE,message=FALSE,fig.width=14,fig.height=8}
+# And, we make predictions for that model using the geometric mean of `lambda.min` and `lambda.1se`..
+glmnet_pred <- glmnet_cv %$% 
+  predict(.,newx = model_mat[,setdiff(colnames(model_mat),names(hicor))], #glmdata %>% select(-outcome) %>% as.matrix(), 
+  s = exp(mean(log(c(lambda.1se,lambda.min))))
+)
+
+# Collect the predictions in a data table...
+predictions <- data_frame(predicted_earnings = glmnet_pred[,1]) %>% 
+  bind_cols(
+    studentBF %>% 
+      select(Year,unitID,College,outcome, one_of(setdiff(covariates,'College_ID')) ) %>% 
+      filter(complete.cases(.))
+  ) %>% 
+  inner_join( dominant_discipline %>% select(-College), by = c('Year','unitID') ) %>%
+  select(Year,unitID,College,outcome,predicted_earnings,dominant_discipline)
+
+select_colleges <- c('Harvard','Princeton','Yale','Stanford','(Cornell U)','(^Univ.+Pennsyl[a-v]+$)',
+                     '(Northwestern U)','Duke','Vanderbilt','Swarthmore','(Pomona C)','Johns Hopk','Washington.+St.+Louis')
+predictions %>%
+  mutate( College = sprintf("%s,%d",College,Year) ) %>%
+  {
+    ggplot(., aes(x=predicted_earnings,y=outcome)) +
+      geom_point(alpha=0.3) +
+      geom_abline(intercept = 0, slope = 1, color = 'red', linetype = 2, size = 1) +
+      geom_text(
+        data = . %>% 
+          filter(
+            Year==max(Year),
+            outcome>quantile(outcome,0.975)|
+              outcome<quantile(outcome,0.025)|
+              grepl(paste(select_colleges,collapse='|'),College)),
+        mapping = aes(label = College, color=dominant_discipline ), 
+        size = 3 
+      ) +
+      ggtitle('Median earnings of students working and not enrolled 6 years after entry') +
+      labs(
+        x = 'Predicted ($/yr)',
+        y = 'Observed ($/yr)'
+      ) +
+      theme( text = element_text( face = 'bold' ) )
+  } %>%
+  print()
+
+
+epremium <- df_coef %>% 
+  filter(grepl('^College',Coefficient)) %>% 
+  mutate(
+    unitID = gsub('.+ID([0-9]+)__.+','\\1',Coefficient) %>% as.integer(),
+    College = gsub('^College_ID.+__','',Coefficient)
+  ) %>% 
+  rename(earnings_premium = `$/util`) %>% 
+  right_join(student %>% filter(Year==2013) %>% select(unitID,College,SAT_AVG)) %>%
+  left_join( student %>% filter(Year==2005) %>% select(unitID,Treasury_md_earn_wne_p6)) %>%
+  rename(outcome = Treasury_md_earn_wne_p6) %>%
+  mutate( earnings_premium=ifelse(is.na(earnings_premium),0,earnings_premium) ) %>% 
+  left_join( predictions %>% filter(Year==2005)) %>%
+  select( -Coefficient, -Year ) %>%
+  select(unitID,College,everything())
+
+```
+
+
+### Plots of the Earnings Premium
+
+First, plot the histogram of earnings premia, demonstrating, as
+mentioned above mixture of zero and non-zero premia.
+
+```{r eprem_plots1,fig.height=8,fig.width=10}
+
+epremium %>% 
+{
+  ggplot(.,aes(x=earnings_premium)) + 
+    geom_histogram(fill='red',alpha=0.3,binwidth = 500) +
+    ggtitle('Earnings Premium Distribution') +
+    labs( x = 'Earnings Premium [$]' )
+}
+```
+
+Plot a bar chart, with the colleges ordered by average SAT score, so we can
+see how the colleges sort out.  
+
+(Interestingly, it still looks like some of the more tech-oriented
+colleges have positive premia while more liberal-arts-oriented colleges have negative premia,
+even though we explictly attempted to model the impact of degree distribution at each college.
+Probably an illustration of the limitations of this approach. Also, a reminder of the fact that
+value from a college education can't be measured in earnings alone.)
+
+```{r eprem_plots2,fig.height=8,fig.width=10}
+
+epremium %>% 
+  arrange(desc(SAT_AVG)) %>% 
+  mutate(College = sprintf('%d. %s',seq_len(nrow(.)),gsub('University','U',College))) %>% 
+  mutate(College=factor(College,levels=College)) %>% 
+  mutate( tval = earnings_premium/sd(earnings_premium) ) %>%
+  slice( seq_len(100) ) %>%
+  #filter(tval<5) %>%
+  {
+    ggplot(., aes(x=College,y=tval,fill=College)) +
+      geom_bar(position='dodge',stat='identity') +
+      #scale_y_continuous(limits=c(-4,4)) +
+      ggtitle( "Earnings Premium" ) +
+      labs( y = 'Standardized Earnings Premium\n ( (Earnings - Predicted Earnings)/Standard Error )') +
+      theme(axis.text.x=element_text(angle = 90, vjust = 0.5,hjust = 1),legend.position = 'none')
+  }
+```
+
+## Value Proposition
+
+Value proposition is defined as the adjusted earnings divided by the expected costs for a household of the student's
+specific income level, thus level of financial need. (Of course, other factors dictate financial need. Here, decreasing
+annual household income of the students in a cohort is the best we have as an indicator of the financial need of those
+students.)
+
+Adjusted earnings is defined as the (grand mean) expected earnings plus the earnings premium for the college multiplied
+by the completion rate of the college.  I.e., we assume completion rate is the probability of a student graduating from
+the college. Then the expected earnings would be this probability multiplied by the earnings of a graduated plus the
+quantity one minus this probability multiplied by the earnings of non-graduates, which for this analysis, 
+we assume to be zero. So these values will, obviously, tend to under-estimate the actual estimated earnings
+(even after our controlling for the covariates in the model).
+
+**Again, this is more an exploration into roughly how the colleges sort out rather than anywhere near a 
+determination of the actual value represented by a college degree from any of the colleges.**
+
+```{r value_funcs }
+
+makeStudentValue <- function(studentBF,epremium,residence_state, income_bracket='gt48Kle75K',sat_lvl='gt1000le1200',unthresh=0 ){
+  student_value <- studentBF %>% select(-College,-outcome,-matches('Treasury|pell|Year2003')) %>%
+    filter( Year == 2013 ) %>% 
+    left_join( student %>% select(Year,unitID, starts_with('NPT')), by = c('Year','unitID' ))  %>%
+    left_join( epremium, by = 'unitID' ) %>%
+    mutate( 
+      Utility = switch(
+        sat_lvl,
+        gt1400       = BF_SAT_gt1400,
+        gt1200le1400 = BF_SAT_gt1200le1400,
+        gt1000le1200 = BF_SAT_gt1000le1200,
+        gt800le1000  = BF_SAT_gt800le1000,
+        le800        = BF_SAT_le800
+      )
+    ) %>% 
+    arrange( desc(Utility) ) %>%
+    mutate(
+      ntp1 = ifelse(grepl('Public',CollegeType),NPT41_PUB,NPT41_PRIV),
+      ntp2 = ifelse(grepl('Public',CollegeType),NPT42_PUB,NPT42_PRIV),
+      ntp3 = ifelse(grepl('Public',CollegeType),NPT43_PUB,NPT43_PRIV),
+      ntp4 = ifelse(grepl('Public',CollegeType),NPT44_PUB,NPT44_PRIV),
+      ntp5 = ifelse(grepl('Public',CollegeType),NPT45_PUB,NPT45_PRIV)
+    ) %>%
+    select( -starts_with('NPT4',ignore.case=FALSE)) %>%
+    #filter( complete.cases(.) ) %>%
+    mutate(
+      INSTATE = state == residence_state,
+      Living_Expenses = COSTT4_A - TUITIONFEE_IN,
+      maxcost = Living_Expenses + ifelse(INSTATE,TUITIONFEE_IN,TUITIONFEE_OUT),
+      ntp  = switch(
+        income_bracket,
+        le30K       = ntp1,
+        gt30Kle48K  = ntp2,
+        gt48Kle75K  = ntp3,
+        gt75Kle110K = ntp4,
+        gt110K      = ntp5
+      ),
+      Earnings_Adjusted = (Expected_Earnings + earnings_premium)*C150_4_POOLED_SUPP, # Assumes all remaining unexplained earnings are due to a premium.
+      inccost = ifelse( INSTATE, ntp, ntp + TUITIONFEE_OUT - TUITIONFEE_IN),
+      unorm = Utility/max(Utility), #10^(Utility-max(Utility)),
+      cnorm  = maxcost/Living_Expenses,
+      c2norm = inccost/Living_Expenses,
+      vnorm = (Earnings_Adjusted/Living_Expenses) / (Earnings_Adjusted[[1]]/Living_Expenses[[1]]), # Earnings normalized by that of the highest utility school.
+      value_prop1 = vnorm/cnorm, #unorm*vnorm/cnorm,
+      value_prop2 = vnorm/c2norm, #unorm*vnorm/c2norm,
+      College = sprintf("%d. %s", order(Utility,decreasing=TRUE), gsub('University','U',College) )
+    ) %>% 
+    filter( unorm>unthresh, value_prop2 < 2*value_prop2[[1]]) %>%
+    mutate(
+      maxv2 = max(value_prop2[unorm>unthresh]),
+      value_prop1 = value_prop1/maxv2,  #ifelse(scale_independently,max(value_prop1),max(value_prop2)),
+      value_prop2 = value_prop2/maxv2
+    ) %>%
+    #filter(value_prop2 < 4 & vnorm < 2 ) %>%
+    gather( key = aid, value = value_prop, value_prop1, value_prop2 ) %>%
+    mutate( 
+      cost = ifelse( aid == 'value_prop1', maxcost, ntp ),
+      coll_label = sprintf("%s,\n$%.1fK/$%.1fK",gsub("^(.+)[^a-zA-Z]+Main Campus","\\1",College),Earnings_Adjusted/1000,cost/1000)
+    ) %>%
+    mutate( aid = ifelse( aid == 'value_prop1', "WITHOUT Financial Aid", "WITH Financial Aid" ) %>% factor(levels=c("WITHOUT Financial Aid","WITH Financial Aid")) )
+}
+
+
+plotValue <- function( stdt_val, residence_state, sat_lvl, income_bracket, scale_independently = FALSE, unthresh = 0, cost_thresh = 70000, earnings_thresh = 0 ){
+  xlims <- c(pmax(unthresh,floor(min(stdt_val$unorm)/0.1)*0.1)-0.05,1.15)
+  stdt_val %>%
+    filter( unorm > unthresh, cost < cost_thresh, Earnings_Adjusted > earnings_thresh ) %>%
+    {
+      ggplot(., aes( x = unorm, y = value_prop, color = CollegeType ) ) + 
+        geom_point() + 
+        geom_text( aes( label = coll_label), vjust = 1.0, size = 3 ) +
+        scale_x_continuous( limits = xlims, breaks = seq(xlims[1]+0.05,xlims[2]-0.05,by=0.10) ) +
+        ggtitle( 
+          label    = sprintf('Value Proposition With & Without Financial Aid (for %s resident, SAT = %s, Income = %s)',residence_state, sat_lvl, income_bracket ), 
+          subtitle = paste(
+            'Value Proposition = Adjusted Earnings/Costs',
+            sprintf('Earnings > $%2.1fK, Cost < $%2.1fK', earnings_thresh/1000, cost_thresh/1000),
+            sep = "; "
+          )
+        ) +
+        labs( 
+          x = sprintf('Normalized Utility: Suitability for student with SAT level %s',sat_lvl), 
+          y = ifelse(scale_independently,'Value Proposition (scaled independently)','Value Proposition')
+        ) +
+        facet_wrap( ~ aid, scales = ifelse(scale_independently,'free','fixed') ) +
+        theme( text = element_text( face = 'bold' ) )
+    }
+}
+
+```
+
+
+### Case: High-SAT, High-Income (i.e., Low-Financial-Need)
+
+Here's the calculation for an Ohio resident from a high-income household 
+(greater than $110,000/yr) and whose SAT score is at the highest level, greater than 1400.
+
+```{r val_prop_hi_SAT,fig.height=8,fig.width=10}
+
+res_state <- 'Ohio'
+sat_level <- 'gt1400'
+inc_level <- 'gt110K'
+student_value <- makeStudentValue( 
+  studentBF, 
+  epremium, 
+  residence_state = res_state,
+  sat_lvl         = sat_level,
+  income_bracket  = inc_level 
+)
+ethresh <- quantile( student_value$Earnings_Adjusted[1:30], 0.04 )
+student_value %>% 
+  plotValue( 
+    residence_state = res_state, 
+    sat_lvl         = sat_level,
+    income_bracket  = inc_level,
+    earnings_thresh = ethresh 
+  )
+
+```
+
+
+### Case: Low-SAT, High-Income (i.e., Low-Financial-Need)
+
+And here's the calculation for an Ohio resident from a high-income household 
+(greater than $110,000/yr) and whose SAT score is at the lowest level, less than 800. 
+
+Notice how the adjusted earnings shown in the data point labels are significantly lower than those
+of the previous plot: In aggregate, the academic ability of a college's students is a strong predictor 
+of the future earnings of the students. (Says nothing about any individual's case.) 
+Also, see how financial aid makes the private colleges competitive in value
+to the public colleges by reducing the net price in the denominator of the formula.
+
+```{r val_prop_low_SAT, echo=FALSE,fig.height=8,fig.width=10 }
+
+res_state <- 'Ohio'
+sat_level <- 'le800'
+inc_level <- 'gt110K'
+student_value <- makeStudentValue( 
+  studentBF, 
+  epremium, 
+  residence_state = res_state,
+  sat_lvl         = sat_level,
+  income_bracket  = inc_level 
+)
+ethresh   <- quantile( student_value$Earnings_Adjusted[1:30], 0.04 )
+student_value %>% 
+  plotValue( 
+    residence_state = res_state, 
+    sat_lvl         = sat_level,
+    income_bracket  = inc_level, 
+    earnings_thresh = ethresh 
+  )
+```
+
+### Case: High-SAT, Low-Income (i.e., High-Financial-Need)
+
+Here's the calculation for an Ohio resident from a low-income household 
+(less than or equal to $30,000/yr) and whose SAT score is at the highest level, greater than 1400. 
+
+Notice how financial aid makes attending an elite private college a fantastic value for such a student.
+
+```{r val_prop_hi_SAT_hi_need, echo=FALSE,fig.height=8,fig.width=10 }
+res_state <- 'Ohio'
+sat_level <- 'gt1400'
+inc_level <- 'le30K'
+student_value <- makeStudentValue( 
+  studentBF, 
+  epremium, 
+  residence_state = res_state,
+  sat_lvl         = sat_level,
+  income_bracket  = inc_level 
+)
+ethresh   <- quantile( student_value$Earnings_Adjusted[1:30], 0.04 )
+student_value %>% 
+  plotValue( 
+    residence_state = res_state, 
+    sat_lvl         = sat_level,
+    income_bracket  = inc_level, 
+    earnings_thresh = ethresh 
+  )
+```
+
+### Value Proposition Given Student's SAT Level and Financial Need Levels
+
+Rather than continue plotting individual cases, sweep over SAT levels and financial need levels (i.e.,
+houshold income levels) to create a lattice of plots.
+
+
+```{r value_all,warning=FALSE}
+sat_levels      <- c('le800','gt800le1000','gt1000le1200','gt1200le1400','gt1400')
+income_levels   <- c('le30K','gt30Kle48K','gt48Kle75K','gt75Kle110K','gt110K','no_aid') %>% rev()
+residence_state <- 'Ohio'
+unthresh <- 0.4
+student_value_all <- 
+  income_levels %>% lapply(
+    function(income_bracket){
+      sat_levels %>% lapply(
+        function(sat_lvl){
+          studentBF %>% select(-College,-outcome,-matches('Treasury|pell|Year2003')) %>%
+            filter( Year == 2013 ) %>% 
+            left_join( student %>% select(Year,unitID, starts_with('NPT')), by = c('Year','unitID' ))  %>%
+            left_join( epremium, by = 'unitID' ) %>%
+            mutate( 
+              Utility = switch(
+                sat_lvl,
+                gt1400       = BF_SAT_gt1400,
+                gt1200le1400 = BF_SAT_gt1200le1400,
+                gt1000le1200 = BF_SAT_gt1000le1200,
+                gt800le1000  = BF_SAT_gt800le1000,
+                le800        = BF_SAT_le800
+              )
+            ) %>% 
+            arrange( desc(Utility) ) %>%
+            mutate(
+              ntp1 = ifelse(grepl('Public',CollegeType),NPT41_PUB,NPT41_PRIV),
+              ntp2 = ifelse(grepl('Public',CollegeType),NPT42_PUB,NPT42_PRIV),
+              ntp3 = ifelse(grepl('Public',CollegeType),NPT43_PUB,NPT43_PRIV),
+              ntp4 = ifelse(grepl('Public',CollegeType),NPT44_PUB,NPT44_PRIV),
+              ntp5 = ifelse(grepl('Public',CollegeType),NPT45_PUB,NPT45_PRIV)
+            ) %>%
+            select( -starts_with('NPT4',ignore.case=FALSE)) %>%
+            filter( !is.na(ntp1),!is.na(ntp2),!is.na(ntp3),!is.na(ntp4),!is.na(ntp5) ) %>%
+            mutate(
+              INSTATE = state == residence_state,
+              Living_Expenses = COSTT4_A - TUITIONFEE_IN,
+              maxcost = Living_Expenses + ifelse(INSTATE,TUITIONFEE_IN,TUITIONFEE_OUT),
+              ntp  = switch(
+                income_bracket,
+                le30K       = ntp1,
+                gt30Kle48K  = ntp2,
+                gt48Kle75K  = ntp3,
+                gt75Kle110K = ntp4,
+                gt110K      = ntp5,
+                no_aid      = maxcost
+              ),
+              Earnings_Adjusted = (Expected_Earnings + earnings_premium)*C150_4_POOLED_SUPP, # Assumes all remaining unexplained earnings are due to a premium.
+              inccost = ifelse( INSTATE, ntp, ntp + TUITIONFEE_OUT - TUITIONFEE_IN),
+              unorm = Utility/max(Utility), #10^(Utility-max(Utility)),
+              cnorm  = inccost/Living_Expenses,
+              vnorm = (Earnings_Adjusted/Living_Expenses) / (Earnings_Adjusted[[1]]/Living_Expenses[[1]]), # Earnings normalized by that of the highest utility school.
+              value_prop = vnorm/cnorm, #unorm*vnorm/cnorm,
+              coll_rank = order( Utility, decreasing = TRUE ),
+              College = sprintf("%d. %s", coll_rank, gsub('University','U',College) )
+            )  %>%
+            #filter(value_prop2 < 4 & vnorm < 2 ) %>%
+            mutate( 
+              cost = ntp,
+              coll_label = sprintf("%s,\n($%.1fK/$%.1fK; %.0f%%)",gsub("^(.+)[^a-zA-Z]+Main Campus","\\1",College),Earnings_Adjusted/1000,cost/1000,C150_4_POOLED_SUPP*100), 
+              SAT  = factor( sat_lvl, levels = sat_levels ), 
+              Need = factor( income_bracket, levels = income_levels ) 
+            )
+        }
+      )
+    }
+  ) %>%
+  unlist( recursive = FALSE ) %>%
+  { do.call( bind_rows, . ) } %>% 
+  #filter( unorm>unthresh, value_prop2 < 2*value_prop2[[1]]) %>%
+  # mutate(
+  #   maxv = quantile(value_prop[unorm>unthresh],0.99), 
+  #   value_prop = value_prop/maxv  #ifelse(scale_independently,max(value_prop1),max(value_prop2)),
+  # ) %>%
+  filter( value_prop < 10 ) # To avoid outliers
+```
+
+The following plots sweep across SAT level, as columns, and financial need level, 
+as rows. Again, as above, the plots are for a resident of Ohio, so out-of-state 
+tuition and fees apply for public schools outside of Ohio. 
+
+(You can fork the script and edit it to test with different states as that in which the student resides.)
+
+
+```{r val_all_plots1,warning=FALSE,fig.height=10,fig.width=11}
+scale_independently <- TRUE
+
+rank_thresh <- 50
+cost_thresh <- 100000
+earnings_thresh <- 0.0
+
+student_value_all %>%
+  filter( coll_rank <= rank_thresh ) %>%
+  group_by( SAT ) %>%
+  filter( coll_rank<=10 | (coll_rank>10 & Earnings_Adjusted>earnings_thresh & cost < cost_thresh)  ) %>%
+  ungroup() %>%
+  {
+    ggplot(., aes( x = unorm, y = value_prop, color = CollegeType ) ) + 
+      geom_point( na.rm = TRUE ) + 
+      scale_x_continuous(limits = c(unthresh-0.1,1.1), breaks = seq(unthresh-0.1,1.1,by=0.1)) + 
+      geom_text( aes( label = coll_label), vjust = 1.0, size = 3, na.rm = TRUE ) +
+      ggtitle( 
+        label    = sprintf('Value Proposition (for %s resident)',residence_state), 
+        subtitle = paste(
+          'Value Proposition = Adjusted Earnings/Costs',
+          sprintf('Earnings > $%2.1fK, Cost < $%2.1fK', earnings_thresh/1000, cost_thresh/1000),
+          sep = "; "
+        )
+      ) +
+      labs( 
+        x = 'Normalized Utility (Suitability for student at SAT level)', 
+        y = ifelse(scale_independently,'Value Proposition (scaled independently)','Value Proposition')
+      ) +
+      theme( text = element_text( face = 'bold' ) ) +
+      facet_grid( 
+        Need ~ SAT, 
+        scales = ifelse(scale_independently,'free','fixed'),
+        labeller = label_both
+      )
+  }
+```
+
+Now the same plot but with the y-axes fixed.
+
+```{r val_all_plots2,warning=FALSE,fig.height=10,fig.width=11,echo=FALSE}
+scale_independently <- FALSE
+
+rank_thresh <- 50
+cost_thresh <- 100000
+earnings_thresh <- 0.0
+
+student_value_all %>%
+  filter( coll_rank <= rank_thresh ) %>%
+  group_by( SAT ) %>%
+  filter( coll_rank<=10 | (coll_rank>10 & Earnings_Adjusted>earnings_thresh & cost < cost_thresh)  ) %>%
+  ungroup() %>%
+  {
+    ggplot(., aes( x = unorm, y = value_prop, color = CollegeType ) ) + 
+      geom_point( na.rm = TRUE ) + 
+      scale_x_continuous(limits = c(unthresh-0.1,1.1), breaks = seq(unthresh-0.1,1.1,by=0.1)) + 
+      geom_text( aes( label = coll_label), vjust = 1.0, size = 3, na.rm = TRUE ) +
+      ggtitle( 
+        label    = sprintf('Value Proposition (for %s resident)',residence_state), 
+        subtitle = paste(
+          'Value Proposition = Adjusted Earnings/Costs',
+          sprintf('Earnings > $%2.1fK, Cost < $%2.1fK', earnings_thresh/1000, cost_thresh/1000),
+          sep = "; "
+        )
+      ) +
+      labs( 
+        x = 'Normalized Utility (Suitability for student at SAT level)', 
+        y = ifelse(scale_independently,'Value Proposition (scaled independently)','Value Proposition')
+      ) +
+      theme( text = element_text( face = 'bold' ) ) +
+      facet_grid( 
+        Need ~ SAT, 
+        scales = ifelse(scale_independently,'free','fixed'),
+        labeller = label_both
+      )
+  }
+```
+
+Finally, plot the lattice one more time, allowing the y-axis of every plot to move independently.
+
+```{r val_all_plots3,warning=FALSE,fig.height=10,fig.width=11,echo=FALSE}
+scale_independently <- TRUE
+
+cost_thresh <- 100000
+earnings_thresh <- 0
+rank_thresh <- 50
+
+# Always plot the top-10, regardless of earnings
+student_value_all %>%
+  filter( coll_rank <= rank_thresh ) %>%
+  group_by( SAT ) %>%
+  filter( coll_rank<=10 | (coll_rank>10 & Earnings_Adjusted>earnings_thresh & cost < cost_thresh)  ) %>%
+  ungroup() %>%
+  {
+    ggplot(., aes( x = unorm, y = value_prop, color = CollegeType ) ) + 
+      geom_point( na.rm = TRUE ) + 
+      scale_x_continuous(limits = c(unthresh-0.1,1.1), breaks = seq(unthresh-0.1,1.1,by=0.1)) + 
+      geom_text( aes( label = coll_label), vjust = 1.0, size = 3, na.rm = TRUE ) +
+      ggtitle( 
+        label    = sprintf('Value Proposition (for %s resident)',residence_state), 
+        subtitle = paste(
+          'Value Proposition = Adjusted Earnings/Costs',
+          sprintf('Rank <= %d, Earnings >=top-quartile, Cost < $%2.1fK', rank_thresh, cost_thresh/1000),
+          sep = "; "
+        )
+      ) +
+      labs( 
+        x = 'Normalized Utility (Suitability for student at SAT level)', 
+        y = ifelse(scale_independently,'Value Proposition (scaled independently)','Value Proposition')
+      ) +
+      theme( text = element_text( face = 'bold' ) ) +
+      facet_wrap( 
+        Need ~ SAT, 
+        ncol = 5,
+        nrow = 6,
+        scales = ifelse(scale_independently,'free','fixed'),
+        labeller = label_both
+      )
+  }
+```
+
+
+
+### Interpretation
+
+The labeling of the rows by "Need" includes the income bracket to which the 
+student's household belongs.
+In other words, the panels in that row correspond to the value proposition for a student whose
+need level is typical for a household of that income bracket. The top row corresponds to a
+need level of "no_aid", meaning the household is wealthy enough to not qualify for any
+financial aid and would pay the full cost of tuition, fees and living expenses.
+
+Note that within a row, the y-coordinate of the college, which is the value proposition
+estimated for any specific college given the financial need level specified for that row, 
+does not change. That y-value for
+a given college stays the same as SAT level changes because the inputs to the value proposition
+equation -- the adjusted earnings, the costs at that row's need level, and the completion rate 
+-- are only properties of the college and not the student and therefore they all stay the same
+as the student's SAT level changes.
+But a different mix of colleges appears in each panel within a row because 
+only the top-100 colleges, in terms of suitability as determined by the Bayes factor 
+at that row's SAT level, are included in each panel, and they change with change in SAT level. 
+
+Also note, that within a column, the x-coordinate of a college, which is the suitability of the
+school for a student scoring at the SAT level specified for that column, does not change.
+Of course the y-values do change because the estimated costs, which is the denominator in the
+value proposition equation, decreases with increasing financial need.
+
+You can see that the value proposition stays roughly the same as we increase SAT level, 
+moving across the columns from left to right. Also, as student SAT level increases, 
+the mix of suitable colleges transitions from many public colleges to primarily 
+the elite private colleges, like the Ivies, MIT, CalTech,
+Stanford, etc.The fact that the mix of colleges also changes
+with SAT level indicates that for each level of student ability, there is a set of colleges
+that fit right into the economic niche to serve them.  However, there is a bit of a dip
+in value proposition in the middle column, corresponding to students from households with
+incomes near the median American income. This issue might be a cause for concern in our 
+nation.... 
+
+Also, the adjusted earnings (shown in the data point labels) for the colleges 
+populating the panels in the leftmost 
+columns are significantly lower than those for the colleges populating the panels in the 
+rightmost columns. This indicates that the expected earnings for low-SAT students are 
+dramatically lower than those of high-SAT students. (Because we adjust the earnings to account
+for the SAT distribution at each college, this drop in adjusted earnings for the low-SAT
+students is driven mainly by dramatically lower completion rates at the colleges most suitable
+for them that at the colleges for high-SAT students.)
+
+The value proposition increases dramatically as we increase the financial need
+level, moving down the rows from top to bottom.  As more and more financial aid kicks in, the 
+costs of the colleges drop significantly (while adjusted earnings and completion rates 
+for each school stay constant).  In fact the value proposition for a high-achieving student, 
+at SAT level greater than 1400, who comes from a household with great financial aid, at income
+level less than $30,000/yr, the Ivy League schools pose an unparallel value proposition at the
+highest suitability levels for that student.
+
+## Caveats
+
+The underlying dataset and the methods
+applied here really **are not** suitable for drawing any strong conclusions about the
+value proposition of a specific college for a specific student.
+This analysis merely demonstrates some of the considerations one might need to address 
+in investigating the value proposition of colleges. It would be interesting to see how the
+quick-and-dirty results shown here compare to a more rigorous analysis and to published sources of
+value comparisons and value rankings of colleges.
+
+Hope you found this to be interesting and it prompts you to dig deeper and to do more....
+
+
+## Copyright Notice
+
+----
+
+Copyright 2017 Michael L. Thompson
+
+----
+
+"collegeValue.Rmd" reapplies portions of 
+"BestCollegeforYou_KaggleSubmission.Rmd" originally submitted to the kaggle.com
+competition "US Dept of Education: College Scorecard" under the Apache License, v. 2.0.
+at https://www.kaggle.com/apollostar/d/kaggle/college-scorecard/which-college-is-best-for-you
+
+----
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+----
+=======
+---
+title: 'College Scorecard: Earnings Premium & Value Proposition'
+author: "Michael L. Thompson"
+date: "January 2, 2017"
+output: 
+  html_document:
+     toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+The U.S. Department of Education College Scorecard database is a rich source of information intended to help students and parents understand the true costs of attending college in America.  This script leverages the database to compute an *earnings premium* and a *value proposition* for each college.
+
+**IMPORTANT: This is a quick-and-dirty stab at an analysis that serves as an exploratory data analysis.**
+**It's not a commentary on the actual value represented by a college. Future earnings aren't the sum total of**
+**the value of a college education, and this analysis is too crude to reliably capture even the earnings component.**
+
+### Earnings Premium
+The earnings premium for a college is the earnings in excess of the average annual earnings at 6 years after matriculation after controlling for (1) the academic abilities of the students at the college, (2) the academic discipline distribution of Bachelor's degrees of the students graduating from the college, and (3) the geographic location and campus locale of the university.
+
+Academic ability is measured by SAT. Academic discipline, by percentages of students receiving each type of degree.  And, geographic location, by the region (New England, Mid-East, Southeast, Southwest, Plains, Great Lakes, Rocky Mountains, and Far West) and the locale (City, Suburb, Town, and Rural).
+
+### Value Proposition
+The value proposition of a college is defined as the ratio of the adjusted annual earnings divided by the expected annual costs of attendendance.  
+
+The adjusted annual earnings is computed by (1) adding the earnings premium  to the overall mean (across all colleges) of annual earnings 6 years after matriculation, and (2) multiplying this sum by the completion rate for the college to adjust for the probability of actually achieving a degree from the college.  
+
+The annual costs are computed across a range of financial need levels: without financial aid and with financial aid corresponding to the household income level (i.e., the net price for the household income level). 
+
+```{r libraries, message=FALSE, warning=FALSE}
+library( magrittr )
+library( tidyverse )
+library( RSQLite )
+library( ggplot2 )
+library( formattable )
+library( glmnet )
+
+```
+
+## Data Preparation
+
+Load the [kaggle.com version of the U.S. Dept. of Education College Scorecard Dataset](kaggle.com) and generate features for modeling using similar code as used in the previously submitted ["Best Colleges for You" script](https://www.kaggle.com/apollostar/d/kaggle/college-scorecard/which-college-is-best-for-you). It uses package `RSQLite` to load the database, and we pare down the database to approximately 900 4-year Bachelor's degree granting colleges.
+
+```{r dataprep, echo = FALSE }
+makeQuery <- function( year, fieldNames, dfNames ){
+  # The fields not included in `fieldNames`, other than "Year", should have the same value regardless of year.
+  paste(
+    "SELECT UNITID unitID,
+INSTNM College,
+CONTROL CollegeType,
+PREDDEG degree,
+CURROPER currop,
+DISTANCEONLY distance,
+RELAFFIL relaffil,
+st_fips state,
+region region,
+LOCALE locale,
+CCBASIC ccbasic,
+Year Year,",
+paste( fieldNames,' ',dfNames,sep="",collapse = ","),
+"FROM Scorecard
+WHERE Year=",year
+  )
+}
+
+fieldNames <-
+  c(
+    'UGDS',
+    "pell_ever",
+    "fsend_1","fsend_2","fsend_3","fsend_4","fsend_5",
+    "COSTT4_A",
+    "NPT4_PUB","NPT4_PRIV","NPT41_PUB","NPT42_PUB","NPT43_PUB","NPT44_PUB","NPT45_PUB",
+    "NPT41_PRIV","NPT42_PRIV","NPT43_PRIV","NPT44_PRIV","NPT45_PRIV",
+    "TUITIONFEE_IN","TUITIONFEE_OUT",
+    "PCTPELL",
+    "SATVR25","SATVR75","SATMT25","SATMT75","SATVRMID","SATMTMID","SATWRMID","SAT_AVG","SAT_AVG_ALL",
+    "C150_4_POOLED_SUPP",
+    "md_earn_wne_p6","md_earn_wne_p8","md_earn_wne_p10"
+  )
+
+# Upper case variables are from 2013 and lower case variables are from the
+# Treasury dataset of 2005, except 'region'. 
+
+fromS11 <- which(fieldNames %in% grep('^[A-Z]|region',fieldNames))
+fromS05 <- setdiff(seq_along(fieldNames),fromS11)
+
+# put a 'Treasury_' prefix on the Treasury variables.
+dfNames <- ifelse(grepl('^[A-Z]|region',fieldNames),fieldNames,paste("Treasury",fieldNames,sep="_"))
+discgrp <- data_frame(
+  LABEL=c("Agriculture, Agriculture Operations, and Related Sciences",
+          "Natural Resources and Conservation",
+          "Architecture and Related Services",
+          "Area, Ethnic, Cultural, Gender, and Group Studies",
+          "Communication, Journalism, and Related Programs",
+          "Communications Technologies/Technicians and Support Services",
+          "Computer and Information Sciences and Support Services",
+          "Personal and Culinary Services",
+          "Education",
+          "Engineering",
+          "Engineering Technologies and Engineering-Related Fields",
+          "Foreign Languages, Literatures, and Linguistics",
+          "Family and Consumer Sciences/Human Sciences",
+          "Legal Professions and Studies",
+          "English Language and Literature/Letters",
+          "Liberal Arts and Sciences, General Studies and Humanities",
+          "Library Science",
+          "Biological and Biomedical Sciences",
+          "Mathematics and Statistics",
+          "Military Technologies and Applied Sciences",
+          "Multi/Interdisciplinary Studies",
+          "Parks, Recreation, Leisure, and Fitness Studies",
+          "Philosophy and Religious Studies",
+          "Theology and Religious Vocations",
+          "Physical Sciences",
+          "Science Technologies/Technicians","Psychology",
+          "Homeland Security, Law Enforcement, Firefighting and Related Protective Services",
+          "Public Administration and Social Service Professions","Social Sciences",
+          "Construction Trades",
+          "Mechanic and Repair Technologies/Technicians",
+          "Precision Production",
+          "Transportation and Materials Moving",
+          "Visual and Performing Arts",
+          "Health Professions and Related Programs",
+          "Business, Management, Marketing, and Related Support Services",
+          "History"),
+  discgrp=c(2,4,2,5,6,4,1,4,5,1,1,5,5,7,5,5,5,2,1,4,5,4,5,5,2,3,3,4,3,3,4,4,4,4,6,2,7,5),
+  VARIABLE.NAME=c("PCIP01","PCIP03","PCIP04","PCIP05","PCIP09","PCIP10","PCIP11","PCIP12","PCIP13",
+                  "PCIP14","PCIP15","PCIP16","PCIP19","PCIP22","PCIP23","PCIP24","PCIP25","PCIP26",
+                  "PCIP27","PCIP29","PCIP30","PCIP31","PCIP38","PCIP39","PCIP40","PCIP41","PCIP42",
+                  "PCIP43","PCIP44","PCIP45","PCIP46","PCIP47","PCIP48","PCIP49","PCIP50","PCIP51",
+                  "PCIP52","PCIP54")
+)
+discNames <- gsub('^([A-Z][-a-z]+)[, and/]*([A-Z][a-z]+).*','\\1\\2',discgrp$LABEL)
+discgrp %<>% tbl_df %>% mutate(discName = discNames)
+
+# Connect to the database.
+db <- dbConnect( dbDriver("SQLite"), "../input/database.sqlite" )
+tables <- dbGetQuery( db, "SELECT Name FROM sqlite_master WHERE type='table'" )
+print.table( tables ) # (tables %>% head(1) %>% head(1)) == "Scorecard"
+allfields <- dbListFields( db, tables[[1]][1] ) 
+#print( setdiff( fieldNames, allfields ) )
+
+# Get discipline distribution data.
+queryStringDscplns <- makeQuery( 2003, discgrp$VARIABLE.NAME, discNames )
+disciplines2003 <- dbGetQuery( db, queryStringDscplns ) %>% 
+  tbl_df() %>% 
+  mutate_each( funs(as.numeric), one_of(discNames) ) 
+queryStringDscplns <- makeQuery( 2005, discgrp$VARIABLE.NAME, discNames )
+disciplines2005 <- dbGetQuery( db, queryStringDscplns ) %>% 
+  tbl_df() %>% 
+  mutate_each( funs(as.numeric), one_of(discNames) ) 
+# queryStringDscplns <- makeQuery( 2012, discgrp$VARIABLE.NAME, discNames )
+# disciplines2012 <- dbGetQuery( db, queryStringDscplns ) %>% 
+#   tbl_df() %>% 
+#   mutate_each( funs(as.numeric), one_of(discNames) ) 
+queryStringDscplns <- makeQuery( 2013, discgrp$VARIABLE.NAME, discNames )
+disciplines2013 <- dbGetQuery( db, queryStringDscplns ) %>% 
+  tbl_df() %>% 
+  mutate_each( funs(as.numeric), one_of(discNames) ) 
+#disciplines2013 %>% select(20:25) %>% print()
+
+# Get Treasury data about students' families.
+queryString2003    <- makeQuery( 2003, fieldNames, dfNames )
+student2003 <- dbGetQuery(db,queryString2003) %>% tbl_df()
+student2003 %<>% select_if( function(col) !all(is.na(col)) ) #%T>% print()
+# Get Treasury data about students' families.
+queryString2005    <- makeQuery( 2005, fieldNames, dfNames )
+student2005 <- dbGetQuery(db,queryString2005) %>% tbl_df()
+student2005 %<>% select_if( function(col) !all(is.na(col)) ) #%T>% print()
+# # Get Treasury data about students' families.
+# queryString2012    <- makeQuery( 2012, fieldNames, dfNames )
+# student2012 <- dbGetQuery(db,queryString2012) %>% tbl_df()
+# student2012 %<>% select_if( function(col) !all(is.na(col)) ) #%T>% print()
+
+# Get latest college/student attribute data.
+queryString2013    <- makeQuery( 2013, fieldNames, dfNames )
+student2013 <- dbGetQuery(db,queryString2013) %>% tbl_df()
+student2013 %<>% select_if( function(col) !all(is.na(col)) ) #%T>% print()
+
+# Disconnect from the database.
+dbDisconnect( db )
+
+
+# Now join the data.tables together to make a single one.
+student <- student2013 %>% select( unitID, everything() ) %>%
+  left_join( disciplines2013 %>% select(unitID, one_of(setdiff(names(disciplines2013),names(student2013)))), by = 'unitID' ) %>%
+  bind_rows( 
+    student2003 %>% select( unitID, everything() ) %>% 
+      left_join( disciplines2003 %>% select(unitID, one_of(setdiff(names(disciplines2003),names(student2003)))), by = 'unitID' ),
+    student2005 %>% select( unitID, everything() ) %>% 
+      left_join( disciplines2005 %>% select(unitID, one_of(setdiff(names(disciplines2005),names(student2005)))), by = 'unitID' )#,
+    # student2012 %>% select( unitID, everything() ) %>% 
+    #   left_join( disciplines2012 %>% select(unitID, one_of(setdiff(names(disciplines2012),names(student2012)))), by = 'unitID' )
+  )
+
+# rm( student2003, disciplines2003, student2005, disciplines2005, student2013)#, student2012, disciplines2012 )
+
+# Turn character columns into factors.
+makeNumsFactors <- function(df){
+  df %>% lapply(
+    function(x) 
+      if(all(grepl('^[-0-9.]+$',x[!is.na(x)]))){
+        as.numeric(x)
+      } else {
+        if(is.character(x) | is.factor(x) | is.logical(x)) {
+          if('PrivacySuppressed' %in% x) {
+            tmp<-x;tmp[x=='PrivacySuppressed']<-NA;as.numeric(tmp)
+          } else {
+            factor(gsub("â€™","'",x))
+          }
+        } else as.numeric(x)
+      }
+  ) %>% 
+    as.data.frame %>% tbl_df
+}
+
+# 
+# Now add the disciplines as grouped
+#student %<>% inner_join( disciplines2013 %>% select( unitID, one_of(setdiff(names(.),names(student))) ), by='unitID' )
+#rm( disciplines2013 )
+
+usa.states.dc <- c("District of Columbia",state.name)
+# Filter down to just the colleges meeting the following criteria:
+student %<>% 
+  mutate(
+    SAT_25=SATVR25+SATMT25,
+    SAT_75=SATVR75+SATMT75
+  ) %>%
+  filter(
+    !grepl('MCPHS Un',College),
+    CollegeType != 'Private for-profit',
+    !is.na(UGDS),
+    UGDS > 0,
+    !is.na(SAT_25), !is.na(SAT_75), !is.na(SAT_AVG),
+    (Year != 2013 & Treasury_md_earn_wne_p6 > 0) | Year == 2013, 
+    currop      == 'Currently certified as operating',
+    degree      == "Predominantly bachelor's-degree granting",
+    as.character(region)      != 'U.S. Service Schools',
+    !grepl('^Associate',ccbasic),
+    state %in% usa.states.dc #,
+#    distance    == 'Not distance-education only',
+   # !is.na(ccbasic),
+    #!is.na(pell_ever),
+   # !grepl('^Special Focus.+Theological',ccbasic)#, #!isTheological,
+    #!is.na(md_earn_wne_p6)
+  ) %>%
+  mutate_each(funs(ifelse(is.na(.),Treasury_md_earn_wne_p6,.)), starts_with('Treasury_mn_earn_wne_'))
+
+student %<>% makeNumsFactors()
+
+# Find the common colleges across all three years and make sure the College name
+# is the same as that used in year 2013.
+unitIDs <- ( (student %>% filter(Year==2003))$unitID ) %>%
+  intersect( (student %>% filter(Year==2005))$unitID ) %>%
+  intersect( (student %>% filter(Year==2013))$unitID ) %>% sort()
+colleges <- student %>% 
+  filter(Year==2013, unitID %in% unitIDs ) %>% 
+  arrange(unitID) %$% 
+  { as.character(College) } %>% 
+  setNames( paste0('u_',unitIDs ) )
+
+student %<>% 
+  filter( unitID %in% unitIDs ) %>% 
+  select( -contains('SATWR') ) %>%
+  group_by(Year) %>% 
+  arrange(unitID) %>%
+  do( (.) %>% mutate(College = colleges[paste0('u_',unitID )]) ) %>%
+  ungroup()
+
+
+# # add an indicator variable for presence of at least one standardized test score statistic:
+# a<- student %>% dplyr::select(matches('^(SAT|ACT)')) %>%  apply(1,function(x) !all(is.na(x)))
+# student %<>% mutate(stdzdtest=a)
+
+
+```
+
+### Feature Engineering: Bayes Factors
+Approximate Bayes factors serve as the features of the model. The Bayes factor is the ratio of the posterior-odds of the hypothesis (i.e., after receiving the evidence) to the prior-odds of the hypothesis (i.e., before seeing the evidence).  The evidence is the attribue of a student -- like "SAT score greater than 1400"" -- and the hypothesis is attendance at the college. (There may not be a compelling reason to do this, but informal testing in other applications indicates a greater ability to distinguish amongst the colleges in the Bayes factors feature space than in the raw variable space.)
+
+Compute the following for the feature corresponding to attribute `Attribute_Y` for each college of interest `College_X` (we use log-base 10 on the Bayes factor.):
+
+`BF_log10( hypothesis = College_X | evidence = Attribute_Y )` 
+`= log10( Odds( hypothesis = College_X | evidence = Attribute_Y )/Odds( hypothesis = College_X ) )`
+`= log10( P( evidence = Attribute_Y | hypothesis = College_X )/P( evidence = Attribute_Y | hypothesis = NOT(College_X) ))`
+`~ log10( P( evidence = Attribute_Y | hypothesis = College_X )/P( evidence = Attribute_Y )`
+
+The final approximation is a good one because there are 900 colleges in our working set; so the students attending `College_X` are a very small proportion of the entire American student population. Therefore, the probability of finding a student with `Attribute_Y` amongst students *not* at `College_X` is basically the same as finding such a student amongst the entire student population (`College_X` included).
+
+Above, the flip in the propositions on each side of the conditional ("|") when we go from `Odds(H|E)` to probabilities, `P(E|H)`, occurs by applying Bayes' Rule.
+
+#### Estimating the Probabilities
+For some of the probabilities used in approximating the Bayes factors, the probabilities `P( evidence = Attribute_Y | hypothesis = College_X )` are simply the reported proportions in the database. 
+
+But, the main challenge in using Bayes factors as features is computing the final probabilities for attributes for which only moments and quantiles are reported in the database. For such attributes, we first approximate a full probability distribution of students at the college of interest and then apply the proposition. 
+
+Take SAT for example. We are given the mean, median and quartiles for SAT scores of students at each college.  For each college, we fit a model to these values to approximate the continuous distribution of SAT scores of students at the college.  Then, for an attribute such as `Attribute_Y` = "SAT score greater than 1400", we compute `P( evidence = Attribute_Y | hypothesis = College_X )` by simply computing the upper tail probability of SAT with lower limit 1400.  Finally, to compute `P( evidence = Attribute_Y )`, we simply take the weighted average, across all colleges, of the previously calculated conditional probability, where the weighting is simply the proportion of students attending `College_X` amongst all students in our 1100+ college universe. In the database, field `UGDS` is the number of undergraduate students attending the college. So the proportion of all students attending `College_X` is `P( hypothesis = College_X ) = UGDS[College_X]/sum( UGDS[College_X] )`.
+
+For attributes like region and locale, to estimate `P( evidence = Attribute_Y | hypothesis = College_X )`, we define `Attribute_Y` to reflect preference.  So, for, say `Region == 'Great Lakes'`, `Attribute_Y` is "prefers attending college in Great Lakes region".  And, we use our own subjective knowledge to just assume that of the students attending a college in a specific region (or locale), a non-zero proportion of them preferring attending colleges an alternative region (or locale) and that the alternative regions (locales) that are more similar to the one in which the college exists would have a higher proportion of such students than alternatives that are less similar. For regions, similarity is determined by distance -- e.g., Mid-East is more similar to Great Lakes than is Far West. For locales, similarity is determined by character -- i.e., campuses in suburbs of large cities are more similar to those in large cities than are remote rural campuses.
+
+```{r features, echo=FALSE}
+
+#===================================================
+  ### Academics: Completion rates, admissions rates and SAT scores.
+  # Took a look at scaled test scores, but ultimately settled upon the log-normal
+  # fits to SATs below.
+  academics <- student %>% #filter( Year == 2013 ) %>%
+    dplyr::select(Year,unitID,College,UGDS,C150_4_POOLED_SUPP,SAT_25,SAT_AVG,SAT_75,one_of(discNames))
+  
+  
+  # Clumsily fit log-normal distributions to the SAT score quartiles for each school.
+  fr <- function(x,SAT_AVG,SAT_25,SAT_75,probs=c(0.25,0.75)) {
+    sdl <- x[1]
+    q <- qlnorm(p=probs,meanlog=log(SAT_AVG) - sdl^2/2,sdlog=sdl)
+    log(SAT_25/q[1])^2 + log(SAT_75/q[2])^2
+  }
+  getMuSd <- function(SAT_AVG,SAT_25,SAT_75) {
+    probs  <- c(0.25,0.75)
+    SAT_AVG0 <- SAT_AVG
+    if(SAT_75==1600) {
+      probs   <- probs/(0.75+1.0E-5)
+      SAT_AVG <- (SAT_AVG0 - 1600*(1-(0.75+1.0E-5)))/(0.75+1.0E-5)
+    }
+    soln <- optim(c(0.05), fr,lower=1.0E-3,upper=0.2,method='L-BFGS-B',
+                  SAT_AVG=SAT_AVG,SAT_25=SAT_25,SAT_75=SAT_75,probs=probs)
+    sdl  <- soln$par
+    meanlog  <- log(SAT_AVG) - sdl^2/2
+    pSAT_AVG <- exp(meanlog+0.5*sdl^2)
+    q   <- qlnorm(p=probs,meanlog=meanlog,sdlog=sdl)
+    if(SAT_75==1600){
+      pSAT_AVG <- pSAT_AVG*(0.75+1.0E-5) + 1600*(1-(0.75+1.0E-5))
+    }
+    return(c(meanlog=meanlog,sdlog=sdl,pSAT_25=q[1],pSAT_AVG=pSAT_AVG,pSAT_75=q[2]))
+  }
+  
+  # Get the log-normal parameters of the SAT distribution for each school
+  academics <- academics %$% {bind_cols(.,as.data.frame(t(mapply(getMuSd,SAT_AVG,SAT_25,SAT_75))))}
+  academics %>% 
+    filter(Year==2013,grepl('Harvard|Cal.+Inst.+Tech|Mass.+Inst.+Tech|Princeton U|Northwestern U|Cornell U',College)) %>% 
+    arrange(desc(SAT_AVG)) %>%
+    formattable() %>%
+    as.datatable()
+  
+  # Discretize the SAT distributions
+  academics %<>%
+    #filter(!is.na(C150_4_POOLED_SUPP)) %>%
+    mutate(probSchool = UGDS/sum(UGDS),
+           # 20160315: MLT #
+           logPadmit_le800        = plnorm( 800, meanlog, sdlog, log.p = TRUE),
+           logPadmit_gt800le1000  = plnorm(1000, meanlog, sdlog, log.p = TRUE),
+           logPadmit_gt1000le1200 = plnorm(1200, meanlog, sdlog, log.p = TRUE),
+           logPadmit_gt1200le1400 = plnorm(1400, meanlog, sdlog, log.p = TRUE),
+           logPadmit_gt1400       = 0,
+           
+           p_le800        = plnorm( 800,meanlog,sdlog),
+           p_gt800le1000  = plnorm(1000,meanlog,sdlog) - p_le800,
+           p_gt1000le1200 = plnorm(1200,meanlog,sdlog) - plnorm(1000,meanlog,sdlog),
+           p_gt1200le1400 = plnorm(1400,meanlog,sdlog) - plnorm(1200,meanlog,sdlog),
+           p_gt1400       = plnorm(1400,meanlog,sdlog,lower.tail=FALSE),
+           totprob        = p_le800 + p_gt800le1000 + p_gt1000le1200 + p_gt1200le1400 + p_gt1400)
+  
+
+  # Compute Bayes Factors for the discretized SAT score distributions of each school
+  makeBF <- function(x) ifelse(x<=0,-5,log10(x/sum(x*academics$probSchool,na.rm=TRUE))) # Approximate
+  academicsBF <- academics %>% 
+    select(matches('BF_SAT|log|prob|^p_'),one_of(discNames))  %>%
+    lapply(function(x) ifelse(x<=0,log10(1.0E-5),log10(x/sum(x*academics$probSchool,na.rm=TRUE)))) %>%
+    as_data_frame() %>% 
+    setNames(gsub("^p_","SAT_",names(.))) %>%
+    setNames(paste0('BF_',names(.))) %>%
+    bind_cols( academics %>% select(-matches('BF_SAT|log|prob|^p_'),-one_of(discNames)) )
+
+  disciplines <- academics %>% select(one_of(discNames))
+  discEntropy <- data_frame(
+    discBreadth = rowSums(-(disciplines * log(disciplines)),na.rm = TRUE),
+    Year   = academics$Year,
+    unitID = academics$unitID
+  ) %>% 
+    mutate(BF_discBreadth = discBreadth - median(discBreadth))
+  
+  academicsBF %<>% inner_join(discEntropy,by=c('Year','unitID'))
+
+
+  ### College Setting: locale & region.
+  localeNames <- sort(unique(as.character(student$locale)))
+  localeAggregates <- setNames(c(gsub('([^ ]+) ([^ ]+).+','\\1\\2',localeNames[1:3]),
+                                 rep('Rural',3),
+                                 gsub('([^ ]+) ([^ ]+).+','\\1\\2',localeNames[7]),
+                                 rep('Suburb:Small/Midsize & Town:Fringe',2),
+                                 gsub('([^ ]+) ([^ ]+).+','\\1\\2',localeNames[10]),
+                                 'Suburb:Small/Midsize & Town:Fringe',
+                                 gsub('([^ ]+) ([^ ]+).+','\\1\\2',localeNames[12])),localeNames)
+  student %<>% 
+    group_by( unitID ) %>%
+    do(
+      (.) %>% mutate(locale = locale[!is.na(locale)][[1]])
+    ) %>%
+    ungroup() %>%
+    mutate(localeAgg = factor(localeAggregates[as.character(locale)],
+                              levels=c('Rural','Town:Remote','Town:Distant','Suburb:Small/Midsize & Town:Fringe',
+                                       'Suburb:Large','City:Small','City:Midsize','City:Large')))
+  
+  makeBF <- function(x) {x <- 1.0E-9 + x;log10(x/sum(x*settingBF$probSchool,na.rm=TRUE))} # Approximate
+  settingBF <- student %>% 
+    dplyr::select(Year,unitID,College,UGDS,localeAgg,region) %>%
+    mutate(probSchool = UGDS/sum(UGDS))
+  a <- settingBF %$% model.matrix(~localeAgg - 1,data=.)
+  localeColNames <- gsub('^([^:]+):*(.+)$','BF_\\1\\2',colnames(a))
+  colnames(a) <- localeColNames
+  locAbbr <- gsub('^.+Agg(.{4}).+','\\1',colnames(a))
+  
+  # Define similarity factors: This is a subjective probability (based on my opinion) determining how likely a student would attend college in
+  # a locale (col) other than his/her most-preferred locale (row).  So each row sums to 1.
+  fctr <- matrix(c(     1,  0.8, 0.01, 0.0001,
+                      0.8,    1, 0.7 ,   0.01,
+                     0.01,  0.7,    1,    0.8,
+                   0.0001, 0.01,  0.8,      1)/2,nrow=4,ncol=4,byrow=TRUE, 
+                 dimnames=list(key=c('Rura','Town','Subu','City'), other=c('Rura','Town','Subu','City')))
+  # Expand factors to cover all locales.
+  fctr <- fctr[locAbbr,locAbbr]
+  fctr[row(fctr) == col(fctr)] <- 1 # put ones on the diagonal
+  dimnames(fctr) <- list(localeColNames,localeColNames)
+  
+  # Here's a "flattening" transformation so that similarities are essentially
+  # increased (since all elements of fctr are <= 1.)
+  fctr %<>% sqrt 
+  fctr <- fctr / rowSums(fctr)
+  
+  # Reweight the local indicators.
+  a <- a %*% fctr
+  # Convert locale indicators intor psuedo-Bayes factors.
+  a %<>% as.data.frame %>% tbl_df %>% mutate_each(funs(makeBF))
+  
+  
+  settingBF %<>% dplyr::select(-localeAgg) %>% bind_cols(a)
+  
+  #regNames <- c('FarWest','GreatLakes','MidEast','NewEngland','Plains','RockyMountains','Southeast','Southwest')
+  a <- settingBF %>%
+    mutate(regionName = factor(gsub(' ','',as.character(student$region)))) %$% 
+    model.matrix(~regionName - 1,data=.)
+  # Define similarity factors
+  fctrRegion <- matrix(c(1, 0.03, 0.0, 0.0, 0.1, 0.3, 0.0, 0.3,
+                         0.03, 1, 0.3, 0.1, 0.3, 0.1, 0.03, 0.03,
+                         0.0, 0.3, 1,  0.3, 0.01, 0.0, 0.1, 0.0,
+                         0.0, 0.1, 0.3, 1, 0.0, 0.0, 0.0, 0.0,
+                         0.1, 0.3, 0.01, 0.0, 1, 0.3, 0.1, 0.1,
+                         0.3, 0.1, 0.0, 0.0, 0.3, 1, 0.0, 0.3,
+                         0.0, 0.03, 0.1, 0.0, 0.1, 0.0, 1, 0.3,
+                         0.3,0.03, 0.0, 0.0, 0.1, 0.3, 0.3, 1),nrow=8,ncol=8,byrow=TRUE,
+                       dimnames=list(colnames(a),colnames(a)))
+  a <- a %*% fctrRegion
+  colnames(a) <- gsub('^regionName','BF_',colnames(a))
+  a %<>% as.data.frame %>% tbl_df %>% mutate_each(funs(makeBF))
+  settingBF %<>% dplyr::select(-region) %>% bind_cols(a)
+
+  ### Student Aid:
+  aid <- student %>% 
+    dplyr::select(Year,unitID,College,UGDS,matches("pell_ever|fsend")) %>%
+    group_by( unitID ) %>%
+    do(
+      (.) %>% mutate_each(funs(ifelse(is.na(.),(.)[!is.na(.)][[1]],.)),matches("pell_ever|fsend"))
+    ) %>%
+    ungroup() %>%
+    mutate(probSchool = UGDS/sum(UGDS),
+           totprob    = rowSums(as.matrix(.[grepl('fsend',names(.))])))
+  #aid %>% print(n=20)
+  makeBF <- function(x) {x <- 1.0E-9 + x;log10(x/sum(x*aid$probSchool,na.rm=TRUE))} # Approximate
+  aidBF <- aid %>% 
+    dplyr::select(matches("pell_ever|fsend")) %>% 
+    mutate_each(funs(makeBF)) %>% 
+    setNames(paste0("BF_",names(.))) %$%
+    bind_cols(aid %>% dplyr::select(-matches("pell_ever|fsend")),.)
+  
+    
+  # Now combine them all together to form the features data.table.
+  studentBF <-   
+    student %>% select(
+      Year,unitID,College,CollegeType,state,UGDS,C150_4_POOLED_SUPP,TUITIONFEE_IN,TUITIONFEE_OUT,COSTT4_A,
+      contains('md_earn_wne_p6')
+      ) %>%
+    inner_join(settingBF   %>% select(-College,-UGDS,-probSchool), by=c('Year','unitID')) %>%
+    inner_join(academicsBF %>% select(-College,-UGDS,-C150_4_POOLED_SUPP), by=c('Year','unitID')) %>%
+    inner_join(aidBF       %>% select(-College,-UGDS), by=c('Year','unitID')) %>%
+    mutate(BF_prior = log10(nrow(.)*UGDS/sum(UGDS)))
+  # Add interactions...
+  studentBF %<>% 
+    mutate_each(funs(10^(.)),starts_with('BF')) %>% 
+    rename( outcome = Treasury_md_earn_wne_p6) %>%
+    mutate( Year2003 = ifelse(Year==2003,1,0)) %>%
+    mutate( Living_Expenses = COSTT4_A - TUITIONFEE_IN ) %>%
+    mutate( Living_Expenses = (Living_Expenses - mean(Living_Expenses,na.rm=TRUE))/sd(Living_Expenses,na.rm=TRUE)) %>%
+    mutate( topSAT2 = (BF_SAT_gt1400-mean(BF_SAT_gt1400))^2, bottomSAT2 = (BF_SAT_le800-mean(BF_SAT_le800))^2, pell2 = (BF_Treasury_pell_ever-mean(BF_Treasury_pell_ever))^2, 
+            prior2 = (BF_prior-mean(BF_prior,na.rm=TRUE))^2,
+            breadth_health  = -(BF_discBreadth - mean(BF_discBreadth))*(BF_HealthProfessions-mean(BF_HealthProfessions,na.rm=TRUE)),
+            breadth_arts    = -(BF_discBreadth - mean(BF_discBreadth))*(BF_VisualPerforming-mean(BF_VisualPerforming,na.rm=TRUE)),
+            breadth_engg    = -(BF_discBreadth - mean(BF_discBreadth))*(BF_Engineering-mean(BF_Engineering,na.rm=TRUE)),
+            breadth_busmgmt = -(BF_discBreadth - mean(BF_discBreadth))*(BF_BusinessManagement-mean(BF_BusinessManagement,na.rm=TRUE)),
+            breadth_libarts = -(BF_discBreadth - mean(BF_discBreadth))*(BF_LiberalArts-mean(BF_LiberalArts,na.rm=TRUE)),
+            breadth_bio     = -(BF_discBreadth - mean(BF_discBreadth))*(BF_BiologicalBiomedical-mean(BF_BiologicalBiomedical,na.rm=TRUE)),
+            breadth_socsci  = -(BF_discBreadth - mean(BF_discBreadth))*(BF_SocialSciences-mean(BF_SocialSciences,na.rm=TRUE)),
+            breadth_edu     = -(BF_discBreadth - mean(BF_discBreadth))*(BF_Education-mean(BF_Education,na.rm=TRUE)),
+            breadth_eng     = -(BF_discBreadth - mean(BF_discBreadth))*(BF_EnglishLanguage-mean(BF_EnglishLanguage,na.rm=TRUE)),
+            breadth_psych   = -(BF_discBreadth - mean(BF_discBreadth))*(BF_Psychology-mean(BF_Psychology,na.rm=TRUE)),
+            breadth_prks    = -(BF_discBreadth - mean(BF_discBreadth))*(BF_ParksRecreation-mean(BF_ParksRecreation,na.rm=TRUE)),
+            breadth_hmsec   = -(BF_discBreadth - mean(BF_discBreadth))*(BF_HomelandSecurity-mean(BF_HomelandSecurity,na.rm=TRUE))
+    ) 
+```
+
+## Earnings Premium and Value Proposition Calculation
+A true "earnings premium"" cannot be reliably computed from this dataset because we only have earnings data for years 2003 and 2005 years, and all manner of factors are obscured by the way the data are aggregated and the noisiness of values. 
+
+Package `glmnet` is used to estimate a model, including the discrete factor `College_ID` as a fixed effect.  For those
+colleges with a corresponding coefficient included in the model, we use the estimated coefficient as the earnings premium. Many of the colleges drop out of the model. So, as you'll see below, the histogram of earnings premiums looks like a mixture of a spike at zero and a broad normal distribution with tails stretching away from zero in either direction.
+
+### Model to Predict Expected Earnings
+
+First, we use package `glmnet` to fit the model to the median earnings at 6-years after matriculation.
+
+After defining `covariates`, a character vector of the covariate names, we computed the correlation matrix of the columns
+in `studentBF`.  Subsets of the columns were defined by a single multi-valued variable, e.g., `region`, so there's lots
+of collinearity and some pure confounding of interactions with main effects and other interactions. So, we pruned the covariate vector based on a heuristic screening of highly correlated terms in the `model.matrix`.
+
+```{r model,fig.height=8,fig.width=10}
+covariates <- c(
+  "Year2003",
+  "BF_localeAggRural",
+  #"BF_localeAggTownRemote",
+  #"BF_localeAggTownDistant",
+  #"BF_localeAggSuburbSmall/Midsize & Town:Fringe","BF_localeAggSuburbLarge",
+  "BF_localeAggCitySmall",
+  #"BF_localeAggCityMidsize",
+  "BF_localeAggCityLarge",
+  "BF_FarWest(AK,CA,HI,NV,OR,WA)",
+  "BF_GreatLakes(IL,IN,MI,OH,WI)",
+  "BF_MidEast(DE,DC,MD,NJ,NY,PA)",
+  #"BF_NewEngland(CT,ME,MA,NH,RI,VT)",
+  "BF_Plains(IA,KS,MN,MO,NE,ND,SD)",
+  #"BF_RockyMountains(CO,ID,MT,UT,WY)",
+  "BF_Southeast(AL,AR,FL,GA,KY,LA,MS,NC,SC,TN,VA,WV)",
+  "BF_Southwest(AZ,NM,OK,TX)",
+  "BF_SAT_le800",
+  #"BF_SAT_gt800le1000",
+  "BF_SAT_gt1000le1200","BF_SAT_gt1200le1400",
+  "BF_SAT_gt1400",
+  "BF_AgricultureAgriculture",
+  "BF_NaturalResources","BF_ArchitectureRelated",
+  "BF_AreaEthnic","BF_CommunicationJournalism",
+  "BF_CommunicationsTechnologies","BF_ComputerInformation",
+  "BF_PersonalCulinary","BF_Education",
+  "BF_Engineering","BF_EngineeringTechnologies",
+  "BF_ForeignLanguages","BF_FamilyConsumer",
+  "BF_LegalProfessions","BF_EnglishLanguage",
+  "BF_LiberalArts","BF_LibraryScience",
+  "BF_BiologicalBiomedical","BF_MathematicsStatistics",
+  #"BF_MilitaryTechnologies",
+  "BF_MultiInterdisciplinary",
+  "BF_ParksRecreation","BF_PhilosophyReligious",
+  "BF_TheologyReligious","BF_PhysicalSciences",
+  "BF_ScienceTechnologies","BF_Psychology",
+  "BF_HomelandSecurity","BF_PublicAdministration",
+  "BF_SocialSciences","BF_ConstructionTrades",
+  "BF_MechanicRepair","BF_PrecisionProduction",
+  "BF_TransportationMaterials","BF_VisualPerforming",
+  "BF_HealthProfessions","BF_BusinessManagement",
+  "BF_History",
+  "College_ID"
+  #"BF_discBreadth",
+  #"Living_Expenses",
+  #"topSAT2","bottomSAT2"#,
+  # "breadth_health","breadth_arts",
+  # "breadth_engg","breadth_busmgmt",
+  # "breadth_libarts","breadth_bio",
+  # "breadth_socsci","breadth_edu",
+  # "breadth_eng","breadth_psych",
+  # "breadth_prks","breadth_hmsec"
+)
+
+# formula_string <- paste0(
+#   'outcome ~ (.)^2 + ',
+#   paste(sprintf('poly(BF_%s,2)',setdiff(discNames,"MilitaryTechnologies")), collapse="+")
+# )
+#formula_string <- 'outcome ~ (.-College_ID)^2 + College_ID'
+glmdata   <- studentBF %>% 
+  mutate(College_ID = paste(unitID,College,sep="__")) %>% 
+  select(outcome, one_of(covariates) ) %>% 
+  filter(complete.cases(.))
+
+# Try a model with `College` as a fixed effect; and prune out a bunch of correlated stuff.
+model_mat <- model.matrix( outcome ~ (.-College_ID)^2 + College_ID, data=glmdata )
+fcor      <- cor(model_mat[,-1]) - diag(ncol(model_mat)-1)
+nms       <- colnames(fcor)
+hicor     <- nms %>% 
+  sapply(
+    function(nm) {
+      # scan the upper triangle of the correlation matrxi...
+      ihi<-which(abs(fcor[seq_len(which(nms==nm)),nm])>0.8)
+      setNames(fcor[ihi,nm],nms[ihi])
+    } 
+  )
+hicor     <- hicor[sapply(hicor,length)>0]
+
+# Since we know that some of the interactions are confounded with each other and with some main effects,
+# which causes the cross-validation error to blow up, we'll find the models that have fewer terms than
+# those that blow up and plot the cross-validation mean-squared error for them.
+# Range of `lambda` determined by trial and error.
+set.seed( 2393 )
+glmnet_cv <- cv.glmnet(
+  model_mat[,setdiff(colnames(model_mat),names(hicor))], #glmdata %>% select(-outcome) %>% as.matrix(),
+  glmdata %>% select(outcome) %>% as.matrix(),
+  family='gaussian',
+  lambda = exp(seq(log(10),log(100),length.out = 50))
+)
+plot( glmnet_cv )
+
+# # These are the non-zero coefficients for the model using `lambda.1se`.
+# acv %>% coef() %>% {(.)[abs((.)[,1])>0,1]} %>% print()
+# # These are the non-zero coefficients for the model using `lambda.min`.
+# acv %>% coef(s='lambda.min') %>% {(.)[abs((.)[,1])>0,1]} %>% print()
+# These are the non-zero coefficients for the model using the geometric mean of `lambda.min` and `lambda.1se`.
+df_coef <- glmnet_cv %$% 
+  coef(.,s=exp(mean(log(c(lambda.1se,lambda.min))))) %>% 
+  { (.)[abs((.)[,1])>0,1] } %>%
+  { data_frame(Coefficient = names(.), `$/util` = round(.,0)) } 
+df_coef %>%
+  formattable() %>%
+  as.datatable()
+
+
+
+# We use that latter model.
+# It's intercept serves as the grand-mean, i.e., expected earnings of a college after controlling for the covariates
+# and before adding the college's earnings premium.
+Expected_Earnings <- glmnet_cv %$% coef(.,s=exp(mean(log(c(lambda.1se,lambda.min)))))['(Intercept)',]
+print( Expected_Earnings )
+
+```
+
+We now collect the predictions and the earnings premia as determined by the model coefficient for the corresponding
+college.  Any college that does not have a coefficient in the model receives an earnings premium of zero.
+
+
+```{r pred_eprem,warning=FALSE,message=FALSE}
+# And, we make predictions for that model using the geometric mean of `lambda.min` and `lambda.1se`..
+glmnet_pred <- glmnet_cv %$% 
+  predict(.,newx = model_mat[,setdiff(colnames(model_mat),names(hicor))], #glmdata %>% select(-outcome) %>% as.matrix(), 
+  s = exp(mean(log(c(lambda.1se,lambda.min))))
+)
+
+# Collect the predictions in a data table...
+predictions <- data_frame(predicted_earnings = glmnet_pred[,1]) %>% 
+  bind_cols(
+    studentBF %>% 
+      select(Year,unitID,College,outcome, one_of(setdiff(covariates,'College_ID')) ) %>% 
+      filter(complete.cases(.))
+  ) %>% 
+  select(Year,unitID,College,outcome,predicted_earnings)
+
+predictions %>%
+  mutate( College = sprintf("%s,%d",College,Year) ) %>%
+  {
+    ggplot(., aes(x=predicted_earnings,y=outcome)) +
+      geom_point() +
+      geom_abline(intercept = 0, slope = 1, color = 'red', linetype = 2, size = 1) +
+      geom_text(aes(label = College ), size=2, alpha=0.3 ) +
+      ggtitle('Median earnings of students working and not enrolled 6 years after entry') +
+      labs(
+        x = 'Predicted ($/yr)',
+        y = 'Observed ($/yr)'
+      )
+  }
+
+
+epremium <- df_coef %>% 
+  filter(grepl('^College',Coefficient)) %>% 
+  mutate(
+    unitID = gsub('.+ID([0-9]+)__.+','\\1',Coefficient) %>% as.integer(),
+    College = gsub('^College_ID.+__','',Coefficient)
+  ) %>% 
+  rename(earnings_premium = `$/util`) %>% 
+  right_join(student %>% filter(Year==2013) %>% select(unitID,College,SAT_AVG)) %>%
+  left_join( student %>% filter(Year==2005) %>% select(unitID,Treasury_md_earn_wne_p6)) %>%
+  rename(outcome = Treasury_md_earn_wne_p6) %>%
+  mutate( earnings_premium=ifelse(is.na(earnings_premium),0,earnings_premium) ) %>% 
+  left_join( predictions %>% filter(Year==2005)) %>%
+  select( -Coefficient, -Year ) %>%
+  select(unitID,College,everything())
+
+```
+
+
+### Plots of the Earnings Premium
+
+First, plot the histogram of earnings premia, demonstrating, as
+mentioned above mixture of zero and non-zero premia.
+
+```{r eprem_plots1,fig.height=8,fig.width=10}
+
+epremium %>% 
+{
+  ggplot(.,aes(x=earnings_premium)) + 
+    geom_histogram(fill='red',alpha=0.3,binwidth = 500) +
+    ggtitle('Earnings Premium Distribution') +
+    labs( x = 'Earnings Premium [$]' )
+}
+```
+
+Plot a bar chart, with the colleges ordered by average SAT score, so we can
+see how the colleges sort out.  
+
+(Interestingly, it still looks like some of the more tech-oriented
+colleges have positive premia while more liberal-arts-oriented colleges have negative premia,
+even though we explictly attempted to model the impact of degree distribution at each college.
+Probably an illustration of the limitations of this approach. Also, a reminder of the fact that
+value from a college education can't be measured in earnings alone.)
+
+```{r eprem_plots2,fig.height=8,fig.width=10}
+
+epremium %>% 
+  arrange(desc(SAT_AVG)) %>% 
+  mutate(College = sprintf('%d. %s',seq_len(nrow(.)),gsub('University','U',College))) %>% 
+  mutate(College=factor(College,levels=College)) %>% 
+  mutate( tval = earnings_premium/sd(earnings_premium) ) %>%
+  slice( seq_len(100) ) %>%
+  #filter(tval<5) %>%
+  {
+    ggplot(., aes(x=College,y=tval,fill=College)) +
+      geom_bar(position='dodge',stat='identity') +
+      #scale_y_continuous(limits=c(-4,4)) +
+      ggtitle( "Earnings Premium" ) +
+      labs( y = 'Standardized Earnings Premium\n ( (Earnings - Predicted Earnings)/Standard Error )') +
+      theme(axis.text.x=element_text(angle = 90, vjust = 0.5,hjust = 1),legend.position = 'none')
+  }
+```
+
+## Value Proposition
+
+Value proposition is defined as the adjusted earnings divided by the expected costs for a household of the student's
+specific income level, thus level of financial need. (Of course, other factors dictate financial need. Here, decreasing
+annual household income of the students in a cohort is the best we have as an indicator of the financial need of those
+students.)
+
+Adjusted earnings is defined as the (grand mean) expected earnings plus the earnings premium for the college multiplied
+by the completion rate of the college.  I.e., we assume completion rate is the probability of a student graduating from
+the college. Then the expected earnings would be this probability multiplied by the earnings of a graduated plus the
+quantity one minus this probability multiplied by the earnings of non-graduates, which for this analysis, 
+we assume to be zero. So these values will, obviously, tend to under-estimate the actual estimated earnings
+(even after our controlling for the covariates in the model).
+
+**Again, this is more an exploration into roughly how the colleges sort out rather than anywhere near a 
+determination of the actual value represented by a college degree from any of the colleges.**
+
+```{r value_funcs }
+
+makeStudentValue <- function(studentBF,epremium,residence_state, income_bracket='gt48Kle75K',sat_lvl='gt1000le1200',unthresh=0 ){
+  student_value <- studentBF %>% select(-College,-outcome,-matches('Treasury|pell|Year2003')) %>%
+    filter( Year == 2013 ) %>% 
+    left_join( student %>% select(Year,unitID, starts_with('NPT')), by = c('Year','unitID' ))  %>%
+    left_join( epremium, by = 'unitID' ) %>%
+    mutate( 
+      Utility = switch(
+        sat_lvl,
+        gt1400       = BF_SAT_gt1400,
+        gt1200le1400 = BF_SAT_gt1200le1400,
+        gt1000le1200 = BF_SAT_gt1000le1200,
+        gt800le1000  = BF_SAT_gt800le1000,
+        le800        = BF_SAT_le800
+      )
+    ) %>% 
+    arrange( desc(Utility) ) %>%
+    mutate(
+      ntp1 = ifelse(grepl('Public',CollegeType),NPT41_PUB,NPT41_PRIV),
+      ntp2 = ifelse(grepl('Public',CollegeType),NPT42_PUB,NPT42_PRIV),
+      ntp3 = ifelse(grepl('Public',CollegeType),NPT43_PUB,NPT43_PRIV),
+      ntp4 = ifelse(grepl('Public',CollegeType),NPT44_PUB,NPT44_PRIV),
+      ntp5 = ifelse(grepl('Public',CollegeType),NPT45_PUB,NPT45_PRIV)
+    ) %>%
+    select( -starts_with('NPT4',ignore.case=FALSE)) %>%
+    #filter( complete.cases(.) ) %>%
+    mutate(
+      INSTATE = state == residence_state,
+      Living_Expenses = COSTT4_A - TUITIONFEE_IN,
+      maxcost = Living_Expenses + ifelse(INSTATE,TUITIONFEE_IN,TUITIONFEE_OUT),
+      ntp  = switch(
+        income_bracket,
+        le30K       = ntp1,
+        gt30Kle48K  = ntp2,
+        gt48Kle75K  = ntp3,
+        gt75Kle110K = ntp4,
+        gt110K      = ntp5
+      ),
+      Earnings_Adjusted = (Expected_Earnings + earnings_premium)*C150_4_POOLED_SUPP, # Assumes all remaining unexplained earnings are due to a premium.
+      inccost = ifelse( INSTATE, ntp, ntp + TUITIONFEE_OUT - TUITIONFEE_IN),
+      unorm = Utility/max(Utility), #10^(Utility-max(Utility)),
+      cnorm  = maxcost/Living_Expenses,
+      c2norm = inccost/Living_Expenses,
+      vnorm = (Earnings_Adjusted/Living_Expenses) / (Earnings_Adjusted[[1]]/Living_Expenses[[1]]), # Earnings normalized by that of the highest utility school.
+      value_prop1 = vnorm/cnorm, #unorm*vnorm/cnorm,
+      value_prop2 = vnorm/c2norm, #unorm*vnorm/c2norm,
+      College = sprintf("%d. %s", order(Utility,decreasing=TRUE), gsub('University','U',College) )
+    ) %>% 
+    filter( unorm>unthresh, value_prop2 < 2*value_prop2[[1]]) %>%
+    mutate(
+      maxv2 = max(value_prop2[unorm>unthresh]),
+      value_prop1 = value_prop1/maxv2,  #ifelse(scale_independently,max(value_prop1),max(value_prop2)),
+      value_prop2 = value_prop2/maxv2
+    ) %>%
+    #filter(value_prop2 < 4 & vnorm < 2 ) %>%
+    gather( key = aid, value = value_prop, value_prop1, value_prop2 ) %>%
+    mutate( 
+      cost = ifelse( aid == 'value_prop1', maxcost, ntp ),
+      coll_label = sprintf("%s,\n$%.1fK/$%.1fK",gsub("^(.+)[^a-zA-Z]+Main Campus","\\1",College),Earnings_Adjusted/1000,cost/1000)
+    ) %>%
+    mutate( aid = ifelse( aid == 'value_prop1', "WITHOUT Financial Aid", "WITH Financial Aid" ) %>% factor(levels=c("WITHOUT Financial Aid","WITH Financial Aid")) )
+}
+
+
+plotValue <- function( stdt_val, residence_state, sat_lvl, income_bracket, scale_independently = FALSE, unthresh = 0, cost_thresh = 70000, earnings_thresh = 0 ){
+  xlims <- c(pmax(unthresh,floor(min(stdt_val$unorm)/0.1)*0.1)-0.05,1.15)
+  stdt_val %>%
+    filter( unorm > unthresh, cost < cost_thresh, Earnings_Adjusted > earnings_thresh ) %>%
+    {
+      ggplot(., aes( x = unorm, y = value_prop, color = CollegeType ) ) + 
+        geom_point() + 
+        geom_text( aes( label = coll_label), vjust = 1.0, size = 3 ) +
+        scale_x_continuous( limits = xlims, breaks = seq(xlims[1]+0.05,xlims[2]-0.05,by=0.10) ) +
+        ggtitle( 
+          label    = sprintf('Value Proposition With & Without Financial Aid (for %s resident, SAT = %s, Income = %s)',residence_state, sat_lvl, income_bracket ), 
+          subtitle = paste(
+            'Value Proposition = Adjusted Earnings/Costs',
+            sprintf('Earnings > $%2.1fK, Cost < $%2.1fK', earnings_thresh/1000, cost_thresh/1000),
+            sep = "; "
+          )
+        ) +
+        labs( 
+          x = sprintf('Normalized Utility: Suitability for student with SAT level %s',sat_lvl), 
+          y = ifelse(scale_independently,'Value Proposition (scaled independently)','Value Proposition')
+        ) +
+        facet_wrap( ~ aid, scales = ifelse(scale_independently,'free','fixed') ) +
+        theme( text = element_text( face = 'bold' ) )
+    }
+}
+
+```
+
+
+### Case: High-SAT, High-Income (i.e., Low-Financial-Need)
+
+Here's the calculation for an Ohio resident from a high-income household 
+(greater than $110,000/yr) and whose SAT score is at the highest level, greater than 1400.
+
+```{r val_prop_hi_SAT,fig.height=8,fig.width=10}
+
+res_state <- 'Ohio'
+sat_level <- 'gt1400'
+inc_level <- 'gt110K'
+student_value <- makeStudentValue( 
+  studentBF, 
+  epremium, 
+  residence_state = res_state,
+  sat_lvl         = sat_level,
+  income_bracket  = inc_level 
+)
+ethresh <- quantile( student_value$Earnings_Adjusted[1:30], 0.04 )
+student_value %>% 
+  plotValue( 
+    residence_state = res_state, 
+    sat_lvl         = sat_level,
+    income_bracket  = inc_level,
+    earnings_thresh = ethresh 
+  )
+
+```
+
+
+### Case: Low-SAT, High-Income (i.e., Low-Financial-Need)
+
+And here's the calculation for an Ohio resident from a high-income household 
+(greater than $110,000/yr) and whose SAT score is at the lowest level, less than 800. 
+
+Notice how the adjusted earnings shown in the data point labels are significantly lower than those
+of the previous plot: In aggregate, the academic ability of a college's students is a strong predictor 
+of the future earnings of the students. (Says nothing about any individual's case.) 
+Also, see how financial aid makes the private colleges competitive in value
+to the public colleges by reducing the net price in the denominator of the formula.
+
+```{r val_prop_low_SAT, echo=FALSE,fig.height=8,fig.width=10 }
+
+res_state <- 'Ohio'
+sat_level <- 'le800'
+inc_level <- 'gt110K'
+student_value <- makeStudentValue( 
+  studentBF, 
+  epremium, 
+  residence_state = res_state,
+  sat_lvl         = sat_level,
+  income_bracket  = inc_level 
+)
+ethresh   <- quantile( student_value$Earnings_Adjusted[1:30], 0.04 )
+student_value %>% 
+  plotValue( 
+    residence_state = res_state, 
+    sat_lvl         = sat_level,
+    income_bracket  = inc_level, 
+    earnings_thresh = ethresh 
+  )
+```
+
+### Case: High-SAT, Low-Income (i.e., High-Financial-Need)
+
+Here's the calculation for an Ohio resident from a low-income household 
+(less than or equal to $30,000/yr) and whose SAT score is at the highest level, greater than 1400. 
+
+Notice how financial aid makes attending an elite private college a fantastic value for such a student.
+
+```{r val_prop_hi_SAT_hi_need, echo=FALSE,fig.height=8,fig.width=10 }
+res_state <- 'Ohio'
+sat_level <- 'gt1400'
+inc_level <- 'le30K'
+student_value <- makeStudentValue( 
+  studentBF, 
+  epremium, 
+  residence_state = res_state,
+  sat_lvl         = sat_level,
+  income_bracket  = inc_level 
+)
+ethresh   <- quantile( student_value$Earnings_Adjusted[1:30], 0.04 )
+student_value %>% 
+  plotValue( 
+    residence_state = res_state, 
+    sat_lvl         = sat_level,
+    income_bracket  = inc_level, 
+    earnings_thresh = ethresh 
+  )
+```
+
+### Value Proposition Given Student's SAT Level and Financial Need Levels
+
+Rather than continue plotting individual cases, sweep over SAT levels and financial need levels (i.e.,
+houshold income levels) to create a lattice of plots.
+
+
+```{r value_all,warning=FALSE}
+sat_levels      <- c('le800','gt800le1000','gt1000le1200','gt1200le1400','gt1400')
+income_levels   <- c('le30K','gt30Kle48K','gt48Kle75K','gt75Kle110K','gt110K','no_aid') %>% rev()
+residence_state <- 'Ohio'
+unthresh <- 0.4
+student_value_all <- 
+  income_levels %>% lapply(
+    function(income_bracket){
+      sat_levels %>% lapply(
+        function(sat_lvl){
+          studentBF %>% select(-College,-outcome,-matches('Treasury|pell|Year2003')) %>%
+            filter( Year == 2013 ) %>% 
+            left_join( student %>% select(Year,unitID, starts_with('NPT')), by = c('Year','unitID' ))  %>%
+            left_join( epremium, by = 'unitID' ) %>%
+            mutate( 
+              Utility = switch(
+                sat_lvl,
+                gt1400       = BF_SAT_gt1400,
+                gt1200le1400 = BF_SAT_gt1200le1400,
+                gt1000le1200 = BF_SAT_gt1000le1200,
+                gt800le1000  = BF_SAT_gt800le1000,
+                le800        = BF_SAT_le800
+              )
+            ) %>% 
+            arrange( desc(Utility) ) %>%
+            mutate(
+              ntp1 = ifelse(grepl('Public',CollegeType),NPT41_PUB,NPT41_PRIV),
+              ntp2 = ifelse(grepl('Public',CollegeType),NPT42_PUB,NPT42_PRIV),
+              ntp3 = ifelse(grepl('Public',CollegeType),NPT43_PUB,NPT43_PRIV),
+              ntp4 = ifelse(grepl('Public',CollegeType),NPT44_PUB,NPT44_PRIV),
+              ntp5 = ifelse(grepl('Public',CollegeType),NPT45_PUB,NPT45_PRIV)
+            ) %>%
+            select( -starts_with('NPT4',ignore.case=FALSE)) %>%
+            filter( !is.na(ntp1),!is.na(ntp2),!is.na(ntp3),!is.na(ntp4),!is.na(ntp5) ) %>%
+            mutate(
+              INSTATE = state == residence_state,
+              Living_Expenses = COSTT4_A - TUITIONFEE_IN,
+              maxcost = Living_Expenses + ifelse(INSTATE,TUITIONFEE_IN,TUITIONFEE_OUT),
+              ntp  = switch(
+                income_bracket,
+                le30K       = ntp1,
+                gt30Kle48K  = ntp2,
+                gt48Kle75K  = ntp3,
+                gt75Kle110K = ntp4,
+                gt110K      = ntp5,
+                no_aid      = maxcost
+              ),
+              Earnings_Adjusted = (Expected_Earnings + earnings_premium)*C150_4_POOLED_SUPP, # Assumes all remaining unexplained earnings are due to a premium.
+              inccost = ifelse( INSTATE, ntp, ntp + TUITIONFEE_OUT - TUITIONFEE_IN),
+              unorm = Utility/max(Utility), #10^(Utility-max(Utility)),
+              cnorm  = inccost/Living_Expenses,
+              vnorm = (Earnings_Adjusted/Living_Expenses) / (Earnings_Adjusted[[1]]/Living_Expenses[[1]]), # Earnings normalized by that of the highest utility school.
+              value_prop = vnorm/cnorm, #unorm*vnorm/cnorm,
+              coll_rank = order( Utility, decreasing = TRUE ),
+              College = sprintf("%d. %s", coll_rank, gsub('University','U',College) )
+            )  %>%
+            #filter(value_prop2 < 4 & vnorm < 2 ) %>%
+            mutate( 
+              cost = ntp,
+              coll_label = sprintf("%s,\n($%.1fK/$%.1fK; %.0f%%)",gsub("^(.+)[^a-zA-Z]+Main Campus","\\1",College),Earnings_Adjusted/1000,cost/1000,C150_4_POOLED_SUPP*100), 
+              SAT  = factor( sat_lvl, levels = sat_levels ), 
+              Need = factor( income_bracket, levels = income_levels ) 
+            )
+        }
+      )
+    }
+  ) %>%
+  unlist( recursive = FALSE ) %>%
+  { do.call( bind_rows, . ) } %>% 
+  #filter( unorm>unthresh, value_prop2 < 2*value_prop2[[1]]) %>%
+  # mutate(
+  #   maxv = quantile(value_prop[unorm>unthresh],0.99), 
+  #   value_prop = value_prop/maxv  #ifelse(scale_independently,max(value_prop1),max(value_prop2)),
+  # ) %>%
+  filter( value_prop < 10 ) # To avoid outliers
+```
+
+The following plots sweep across SAT level, as columns, and financial need level, 
+as rows. Again, as above, the plots are for a resident of Ohio, so out-of-state 
+tuition and fees apply for public schools outside of Ohio. 
+
+(You can fork the script and edit it to test with different states as that in which the student resides.)
+
+
+```{r val_all_plots1,warning=FALSE,fig.height=10,fig.width=11}
+scale_independently <- TRUE
+
+rank_thresh <- 50
+cost_thresh <- 100000
+earnings_thresh <- 0.0
+
+student_value_all %>%
+  filter( coll_rank <= rank_thresh ) %>%
+  group_by( SAT ) %>%
+  filter( coll_rank<=10 | (coll_rank>10 & Earnings_Adjusted>earnings_thresh & cost < cost_thresh)  ) %>%
+  ungroup() %>%
+  {
+    ggplot(., aes( x = unorm, y = value_prop, color = CollegeType ) ) + 
+      geom_point( na.rm = TRUE ) + 
+      scale_x_continuous(limits = c(unthresh-0.1,1.1), breaks = seq(unthresh-0.1,1.1,by=0.1)) + 
+      geom_text( aes( label = coll_label), vjust = 1.0, size = 3, na.rm = TRUE ) +
+      ggtitle( 
+        label    = sprintf('Value Proposition (for %s resident)',residence_state), 
+        subtitle = paste(
+          'Value Proposition = Adjusted Earnings/Costs',
+          sprintf('Earnings > $%2.1fK, Cost < $%2.1fK', earnings_thresh/1000, cost_thresh/1000),
+          sep = "; "
+        )
+      ) +
+      labs( 
+        x = 'Normalized Utility (Suitability for student at SAT level)', 
+        y = ifelse(scale_independently,'Value Proposition (scaled independently)','Value Proposition')
+      ) +
+      theme( text = element_text( face = 'bold' ) ) +
+      facet_grid( 
+        Need ~ SAT, 
+        scales = ifelse(scale_independently,'free','fixed'),
+        labeller = label_both
+      )
+  }
+```
+
+Now the same plot but with the y-axes fixed.
+
+```{r val_all_plots2,warning=FALSE,fig.height=10,fig.width=11,echo=FALSE}
+scale_independently <- FALSE
+
+rank_thresh <- 50
+cost_thresh <- 100000
+earnings_thresh <- 0.0
+
+student_value_all %>%
+  filter( coll_rank <= rank_thresh ) %>%
+  group_by( SAT ) %>%
+  filter( coll_rank<=10 | (coll_rank>10 & Earnings_Adjusted>earnings_thresh & cost < cost_thresh)  ) %>%
+  ungroup() %>%
+  {
+    ggplot(., aes( x = unorm, y = value_prop, color = CollegeType ) ) + 
+      geom_point( na.rm = TRUE ) + 
+      scale_x_continuous(limits = c(unthresh-0.1,1.1), breaks = seq(unthresh-0.1,1.1,by=0.1)) + 
+      geom_text( aes( label = coll_label), vjust = 1.0, size = 3, na.rm = TRUE ) +
+      ggtitle( 
+        label    = sprintf('Value Proposition (for %s resident)',residence_state), 
+        subtitle = paste(
+          'Value Proposition = Adjusted Earnings/Costs',
+          sprintf('Earnings > $%2.1fK, Cost < $%2.1fK', earnings_thresh/1000, cost_thresh/1000),
+          sep = "; "
+        )
+      ) +
+      labs( 
+        x = 'Normalized Utility (Suitability for student at SAT level)', 
+        y = ifelse(scale_independently,'Value Proposition (scaled independently)','Value Proposition')
+      ) +
+      theme( text = element_text( face = 'bold' ) ) +
+      facet_grid( 
+        Need ~ SAT, 
+        scales = ifelse(scale_independently,'free','fixed'),
+        labeller = label_both
+      )
+  }
+```
+
+Finally, plot the lattice one more time, allowing the y-axis of every plot to move independently.
+
+```{r val_all_plots3,warning=FALSE,fig.height=10,fig.width=11,echo=FALSE}
+scale_independently <- TRUE
+
+cost_thresh <- 100000
+earnings_thresh <- 0
+rank_thresh <- 50
+
+# Always plot the top-10, regardless of earnings
+student_value_all %>%
+  filter( coll_rank <= rank_thresh ) %>%
+  group_by( SAT ) %>%
+  filter( coll_rank<=10 | (coll_rank>10 & Earnings_Adjusted>earnings_thresh & cost < cost_thresh)  ) %>%
+  ungroup() %>%
+  {
+    ggplot(., aes( x = unorm, y = value_prop, color = CollegeType ) ) + 
+      geom_point( na.rm = TRUE ) + 
+      scale_x_continuous(limits = c(unthresh-0.1,1.1), breaks = seq(unthresh-0.1,1.1,by=0.1)) + 
+      geom_text( aes( label = coll_label), vjust = 1.0, size = 3, na.rm = TRUE ) +
+      ggtitle( 
+        label    = sprintf('Value Proposition (for %s resident)',residence_state), 
+        subtitle = paste(
+          'Value Proposition = Adjusted Earnings/Costs',
+          sprintf('Rank <= %d, Earnings >=top-quartile, Cost < $%2.1fK', rank_thresh, cost_thresh/1000),
+          sep = "; "
+        )
+      ) +
+      labs( 
+        x = 'Normalized Utility (Suitability for student at SAT level)', 
+        y = ifelse(scale_independently,'Value Proposition (scaled independently)','Value Proposition')
+      ) +
+      theme( text = element_text( face = 'bold' ) ) +
+      facet_wrap( 
+        Need ~ SAT, 
+        ncol = 5,
+        nrow = 6,
+        scales = ifelse(scale_independently,'free','fixed'),
+        labeller = label_both
+      )
+  }
+```
+### Interpretation
+
+The labeling of the rows by "Need" includes the income bracket to which the 
+student's household belongs.
+In other words, the panels in that row correspond to the value proposition for a student whose
+need level is typical for a household of that income bracket. The top row corresponds to a
+need level of "no_aid", meaning the household is wealthy enough to not qualify for any
+financial aid and would pay the full cost of tuition, fees and living expenses.
+
+Note that within a row, the y-coordinate of the college, which is the value proposition
+estimated for any specific college given the financial need level specified for that row, 
+does not change. That y-value for
+a given college stays the same as SAT level changes because the inputs to the value proposition
+equation -- the adjusted earnings, the costs at that row's need level, and the completion rate 
+-- are only properties of the college and not the student and therefore they all stay the same
+as the student's SAT level changes.
+But a different mix of colleges appears in each panel within a row because 
+only the top-100 colleges, in terms of suitability as determined by the Bayes factor 
+at that row's SAT level, are included in each panel, and they change with change in SAT level. 
+
+Also note, that within a column, the x-coordinate of a college, which is the suitability of the
+school for a student scoring at the SAT level specified for that column, does not change.
+Of course the y-values do change because the estimated costs, which is the denominator in the
+value proposition equation, decreases with increasing financial need.
+
+You can see that the value proposition stays roughly the same as we increase SAT level, 
+moving across the columns from left to right. Also, as student SAT level increases, 
+the mix of suitable colleges transitions from many public colleges to primarily 
+the elite private colleges, like the Ivies, MIT, CalTech,
+Stanford, etc.The fact that the mix of colleges also changes
+with SAT level indicates that for each level of student ability, there is a set of colleges
+that fit right into the economic niche to serve them.  However, there is a bit of a dip
+in value proposition in the middle column, corresponding to students from households with
+incomes near the median American income. This issue might be a cause for concern in our 
+nation.... 
+
+Also, the adjusted earnings (shown in the data point labels) for the colleges 
+populating the panels in the leftmost 
+columns are significantly lower than those for the colleges populating the panels in the 
+rightmost columns. This indicates that the expected earnings for low-SAT students are 
+dramatically lower than those of high-SAT students. (Because we adjust the earnings to account
+for the SAT distribution at each college, this drop in adjusted earnings for the low-SAT
+students is driven mainly by dramatically lower completion rates at the colleges most suitable
+for them that at the colleges for high-SAT students.)
+
+The value proposition increases dramatically as we increase the financial need
+level, moving down the rows from top to bottom.  As more and more financial aid kicks in, the 
+costs of the colleges drop significantly (while adjusted earnings and completion rates 
+for each school stay constant).  In fact the value proposition for a high-achieving student, 
+at SAT level greater than 1400, who comes from a household with great financial aid, at income
+level less than $30,000/yr, the Ivy League schools pose an unparallel value proposition at the
+highest suitability levels for that student.
+
+## Caveats
+
+The underlying dataset and the methods
+applied here really **are not** suitable for drawing any strong conclusions about the
+value proposition of a specific college for a specific student.
+This analysis merely demonstrates some of the considerations one might need to address 
+in investigating the value proposition of colleges. It would be interesting to see how the
+quick-and-dirty results shown here compare to a more rigorous analysis and to published sources of
+value comparisons and value rankings of colleges.
+
+Hope you found this to be interesting and it prompts you to dig deeper and to do more....
+
+
+## Copyright Notice
+
+=======================================================================================    
+Copyright 2017 Michael L. Thompson    
+=======================================================================================    
+"collegeValue.Rmd" reapplies portions of 
+"BestCollegeforYou_KaggleSubmission.Rmd" originally submitted to the kaggle.com
+competition "US Dept of Education: College Scorecard" under the Apache License, v. 2.0.
+at https://www.kaggle.com/apollostar/d/kaggle/college-scorecard/which-college-is-best-for-you
+
+=======================================================================================    
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+=======================================================================================
+>>>>>>> parent of 765cc05... Folder structuring:collegeValue2.Rmd
+=======
+---
+title: 'College Scorecard: Earnings Premium & Value Proposition'
+author: "Michael L. Thompson"
+date: "January 2, 2017"
+output: 
+  html_document:
+     toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+The U.S. Department of Education College Scorecard database is a rich source of information intended to help students and parents understand the true costs of attending college in America.  This script leverages the database to compute an *earnings premium* and a *value proposition* for each college.
+
+**IMPORTANT: This is a quick-and-dirty stab at an analysis that serves as an exploratory data analysis.**
+**It's not a commentary on the actual value represented by a college. Future earnings aren't the sum total of**
+**the value of a college education, and this analysis is too crude to reliably capture even the earnings component.**
+
+### Earnings Premium
+The earnings premium for a college is the earnings in excess of the average annual earnings at 6 years after matriculation after controlling for (1) the academic abilities of the students at the college, (2) the academic discipline distribution of Bachelor's degrees of the students graduating from the college, and (3) the geographic location and campus locale of the university.
+
+Academic ability is measured by SAT. Academic discipline, by percentages of students receiving each type of degree.  And, geographic location, by the region (New England, Mid-East, Southeast, Southwest, Plains, Great Lakes, Rocky Mountains, and Far West) and the locale (City, Suburb, Town, and Rural).
+
+### Value Proposition
+The value proposition of a college is defined as the ratio of the adjusted annual earnings divided by the expected annual costs of attendendance.  
+
+The adjusted annual earnings is computed by (1) adding the earnings premium  to the overall mean (across all colleges) of annual earnings 6 years after matriculation, and (2) multiplying this sum by the completion rate for the college to adjust for the probability of actually achieving a degree from the college.  
+
+The annual costs are computed across a range of financial need levels: without financial aid and with financial aid corresponding to the household income level (i.e., the net price for the household income level). 
+
+```{r libraries, message=FALSE, warning=FALSE}
+library( magrittr )
+library( tidyverse )
+library( RSQLite )
+library( ggplot2 )
+library( formattable )
+library( glmnet )
+
+```
+
+## Data Preparation
+
+Load the [kaggle.com version of the U.S. Dept. of Education College Scorecard Dataset](kaggle.com) and generate features for modeling using similar code as used in the previously submitted ["Best Colleges for You" script](https://www.kaggle.com/apollostar/d/kaggle/college-scorecard/which-college-is-best-for-you). It uses package `RSQLite` to load the database, and we pare down the database to approximately 900 4-year Bachelor's degree granting colleges.
+
+```{r dataprep, echo = FALSE }
+makeQuery <- function( year, fieldNames, dfNames ){
+  # The fields not included in `fieldNames`, other than "Year", should have the same value regardless of year.
+  paste(
+    "SELECT UNITID unitID,
+INSTNM College,
+CONTROL CollegeType,
+PREDDEG degree,
+CURROPER currop,
+DISTANCEONLY distance,
+RELAFFIL relaffil,
+st_fips state,
+region region,
+LOCALE locale,
+CCBASIC ccbasic,
+Year Year,",
+paste( fieldNames,' ',dfNames,sep="",collapse = ","),
+"FROM Scorecard
+WHERE Year=",year
+  )
+}
+
+fieldNames <-
+  c(
+    'UGDS',
+    "pell_ever",
+    "fsend_1","fsend_2","fsend_3","fsend_4","fsend_5",
+    "COSTT4_A",
+    "NPT4_PUB","NPT4_PRIV","NPT41_PUB","NPT42_PUB","NPT43_PUB","NPT44_PUB","NPT45_PUB",
+    "NPT41_PRIV","NPT42_PRIV","NPT43_PRIV","NPT44_PRIV","NPT45_PRIV",
+    "TUITIONFEE_IN","TUITIONFEE_OUT",
+    "PCTPELL",
+    "SATVR25","SATVR75","SATMT25","SATMT75","SATVRMID","SATMTMID","SATWRMID","SAT_AVG","SAT_AVG_ALL",
+    "C150_4_POOLED_SUPP",
+    "md_earn_wne_p6","md_earn_wne_p8","md_earn_wne_p10"
+  )
+
+# Upper case variables are from 2013 and lower case variables are from the
+# Treasury dataset of 2005, except 'region'. 
+
+fromS11 <- which(fieldNames %in% grep('^[A-Z]|region',fieldNames))
+fromS05 <- setdiff(seq_along(fieldNames),fromS11)
+
+# put a 'Treasury_' prefix on the Treasury variables.
+dfNames <- ifelse(grepl('^[A-Z]|region',fieldNames),fieldNames,paste("Treasury",fieldNames,sep="_"))
+discgrp <- data_frame(
+  LABEL=c("Agriculture, Agriculture Operations, and Related Sciences",
+          "Natural Resources and Conservation",
+          "Architecture and Related Services",
+          "Area, Ethnic, Cultural, Gender, and Group Studies",
+          "Communication, Journalism, and Related Programs",
+          "Communications Technologies/Technicians and Support Services",
+          "Computer and Information Sciences and Support Services",
+          "Personal and Culinary Services",
+          "Education",
+          "Engineering",
+          "Engineering Technologies and Engineering-Related Fields",
+          "Foreign Languages, Literatures, and Linguistics",
+          "Family and Consumer Sciences/Human Sciences",
+          "Legal Professions and Studies",
+          "English Language and Literature/Letters",
+          "Liberal Arts and Sciences, General Studies and Humanities",
+          "Library Science",
+          "Biological and Biomedical Sciences",
+          "Mathematics and Statistics",
+          "Military Technologies and Applied Sciences",
+          "Multi/Interdisciplinary Studies",
+          "Parks, Recreation, Leisure, and Fitness Studies",
+          "Philosophy and Religious Studies",
+          "Theology and Religious Vocations",
+          "Physical Sciences",
+          "Science Technologies/Technicians","Psychology",
+          "Homeland Security, Law Enforcement, Firefighting and Related Protective Services",
+          "Public Administration and Social Service Professions","Social Sciences",
+          "Construction Trades",
+          "Mechanic and Repair Technologies/Technicians",
+          "Precision Production",
+          "Transportation and Materials Moving",
+          "Visual and Performing Arts",
+          "Health Professions and Related Programs",
+          "Business, Management, Marketing, and Related Support Services",
+          "History"),
+  discgrp=c(2,4,2,5,6,4,1,4,5,1,1,5,5,7,5,5,5,2,1,4,5,4,5,5,2,3,3,4,3,3,4,4,4,4,6,2,7,5),
+  VARIABLE.NAME=c("PCIP01","PCIP03","PCIP04","PCIP05","PCIP09","PCIP10","PCIP11","PCIP12","PCIP13",
+                  "PCIP14","PCIP15","PCIP16","PCIP19","PCIP22","PCIP23","PCIP24","PCIP25","PCIP26",
+                  "PCIP27","PCIP29","PCIP30","PCIP31","PCIP38","PCIP39","PCIP40","PCIP41","PCIP42",
+                  "PCIP43","PCIP44","PCIP45","PCIP46","PCIP47","PCIP48","PCIP49","PCIP50","PCIP51",
+                  "PCIP52","PCIP54")
+)
+discNames <- gsub('^([A-Z][-a-z]+)[, and/]*([A-Z][a-z]+).*','\\1\\2',discgrp$LABEL)
+discgrp %<>% tbl_df %>% mutate(discName = discNames)
+
+# Connect to the database.
+db <- dbConnect( dbDriver("SQLite"), "../input/database.sqlite" )
+tables <- dbGetQuery( db, "SELECT Name FROM sqlite_master WHERE type='table'" )
+print.table( tables ) # (tables %>% head(1) %>% head(1)) == "Scorecard"
+allfields <- dbListFields( db, tables[[1]][1] ) 
+#print( setdiff( fieldNames, allfields ) )
+
+# Get discipline distribution data.
+queryStringDscplns <- makeQuery( 2003, discgrp$VARIABLE.NAME, discNames )
+disciplines2003 <- dbGetQuery( db, queryStringDscplns ) %>% 
+  tbl_df() %>% 
+  mutate_each( funs(as.numeric), one_of(discNames) ) 
+queryStringDscplns <- makeQuery( 2005, discgrp$VARIABLE.NAME, discNames )
+disciplines2005 <- dbGetQuery( db, queryStringDscplns ) %>% 
+  tbl_df() %>% 
+  mutate_each( funs(as.numeric), one_of(discNames) ) 
+# queryStringDscplns <- makeQuery( 2012, discgrp$VARIABLE.NAME, discNames )
+# disciplines2012 <- dbGetQuery( db, queryStringDscplns ) %>% 
+#   tbl_df() %>% 
+#   mutate_each( funs(as.numeric), one_of(discNames) ) 
+queryStringDscplns <- makeQuery( 2013, discgrp$VARIABLE.NAME, discNames )
+disciplines2013 <- dbGetQuery( db, queryStringDscplns ) %>% 
+  tbl_df() %>% 
+  mutate_each( funs(as.numeric), one_of(discNames) ) 
+#disciplines2013 %>% select(20:25) %>% print()
+
+# Get Treasury data about students' families.
+queryString2003    <- makeQuery( 2003, fieldNames, dfNames )
+student2003 <- dbGetQuery(db,queryString2003) %>% tbl_df()
+student2003 %<>% select_if( function(col) !all(is.na(col)) ) #%T>% print()
+# Get Treasury data about students' families.
+queryString2005    <- makeQuery( 2005, fieldNames, dfNames )
+student2005 <- dbGetQuery(db,queryString2005) %>% tbl_df()
+student2005 %<>% select_if( function(col) !all(is.na(col)) ) #%T>% print()
+# # Get Treasury data about students' families.
+# queryString2012    <- makeQuery( 2012, fieldNames, dfNames )
+# student2012 <- dbGetQuery(db,queryString2012) %>% tbl_df()
+# student2012 %<>% select_if( function(col) !all(is.na(col)) ) #%T>% print()
+
+# Get latest college/student attribute data.
+queryString2013    <- makeQuery( 2013, fieldNames, dfNames )
+student2013 <- dbGetQuery(db,queryString2013) %>% tbl_df()
+student2013 %<>% select_if( function(col) !all(is.na(col)) ) #%T>% print()
+
+# Disconnect from the database.
+dbDisconnect( db )
+
+
+# Now join the data.tables together to make a single one.
+student <- student2013 %>% select( unitID, everything() ) %>%
+  left_join( disciplines2013 %>% select(unitID, one_of(setdiff(names(disciplines2013),names(student2013)))), by = 'unitID' ) %>%
+  bind_rows( 
+    student2003 %>% select( unitID, everything() ) %>% 
+      left_join( disciplines2003 %>% select(unitID, one_of(setdiff(names(disciplines2003),names(student2003)))), by = 'unitID' ),
+    student2005 %>% select( unitID, everything() ) %>% 
+      left_join( disciplines2005 %>% select(unitID, one_of(setdiff(names(disciplines2005),names(student2005)))), by = 'unitID' )#,
+    # student2012 %>% select( unitID, everything() ) %>% 
+    #   left_join( disciplines2012 %>% select(unitID, one_of(setdiff(names(disciplines2012),names(student2012)))), by = 'unitID' )
+  )
+
+# rm( student2003, disciplines2003, student2005, disciplines2005, student2013)#, student2012, disciplines2012 )
+
+# Turn character columns into factors.
+makeNumsFactors <- function(df){
+  df %>% lapply(
+    function(x) 
+      if(all(grepl('^[-0-9.]+$',x[!is.na(x)]))){
+        as.numeric(x)
+      } else {
+        if(is.character(x) | is.factor(x) | is.logical(x)) {
+          if('PrivacySuppressed' %in% x) {
+            tmp<-x;tmp[x=='PrivacySuppressed']<-NA;as.numeric(tmp)
+          } else {
+            factor(gsub("â€™","'",x))
+          }
+        } else as.numeric(x)
+      }
+  ) %>% 
+    as.data.frame %>% tbl_df
+}
+
+# 
+# Now add the disciplines as grouped
+#student %<>% inner_join( disciplines2013 %>% select( unitID, one_of(setdiff(names(.),names(student))) ), by='unitID' )
+#rm( disciplines2013 )
+
+usa.states.dc <- c("District of Columbia",state.name)
+# Filter down to just the colleges meeting the following criteria:
+student %<>% 
+  mutate(
+    SAT_25=SATVR25+SATMT25,
+    SAT_75=SATVR75+SATMT75
+  ) %>%
+  filter(
+    !grepl('MCPHS Un',College),
+    CollegeType != 'Private for-profit',
+    !is.na(UGDS),
+    UGDS > 0,
+    !is.na(SAT_25), !is.na(SAT_75), !is.na(SAT_AVG),
+    (Year != 2013 & Treasury_md_earn_wne_p6 > 0) | Year == 2013, 
+    currop      == 'Currently certified as operating',
+    degree      == "Predominantly bachelor's-degree granting",
+    as.character(region)      != 'U.S. Service Schools',
+    !grepl('^Associate',ccbasic),
+    state %in% usa.states.dc #,
+#    distance    == 'Not distance-education only',
+   # !is.na(ccbasic),
+    #!is.na(pell_ever),
+   # !grepl('^Special Focus.+Theological',ccbasic)#, #!isTheological,
+    #!is.na(md_earn_wne_p6)
+  ) %>%
+  mutate_each(funs(ifelse(is.na(.),Treasury_md_earn_wne_p6,.)), starts_with('Treasury_mn_earn_wne_'))
+
+student %<>% makeNumsFactors()
+
+# Find the common colleges across all three years and make sure the College name
+# is the same as that used in year 2013.
+unitIDs <- ( (student %>% filter(Year==2003))$unitID ) %>%
+  intersect( (student %>% filter(Year==2005))$unitID ) %>%
+  intersect( (student %>% filter(Year==2013))$unitID ) %>% sort()
+colleges <- student %>% 
+  filter(Year==2013, unitID %in% unitIDs ) %>% 
+  arrange(unitID) %$% 
+  { as.character(College) } %>% 
+  setNames( paste0('u_',unitIDs ) )
+
+student %<>% 
+  filter( unitID %in% unitIDs ) %>% 
+  select( -contains('SATWR') ) %>%
+  group_by(Year) %>% 
+  arrange(unitID) %>%
+  do( (.) %>% mutate(College = colleges[paste0('u_',unitID )]) ) %>%
+  ungroup()
+
+
+# # add an indicator variable for presence of at least one standardized test score statistic:
+# a<- student %>% dplyr::select(matches('^(SAT|ACT)')) %>%  apply(1,function(x) !all(is.na(x)))
+# student %<>% mutate(stdzdtest=a)
+
+
+```
+
+### Feature Engineering: Bayes Factors
+Approximate Bayes factors serve as the features of the model. The Bayes factor is the ratio of the posterior-odds of the hypothesis (i.e., after receiving the evidence) to the prior-odds of the hypothesis (i.e., before seeing the evidence).  The evidence is the attribue of a student -- like "SAT score greater than 1400"" -- and the hypothesis is attendance at the college. (There may not be a compelling reason to do this, but informal testing in other applications indicates a greater ability to distinguish amongst the colleges in the Bayes factors feature space than in the raw variable space.)
+
+Compute the following for the feature corresponding to attribute `Attribute_Y` for each college of interest `College_X` (we use log-base 10 on the Bayes factor.):
+
+`BF_log10( hypothesis = College_X | evidence = Attribute_Y )` 
+`= log10( Odds( hypothesis = College_X | evidence = Attribute_Y )/Odds( hypothesis = College_X ) )`
+`= log10( P( evidence = Attribute_Y | hypothesis = College_X )/P( evidence = Attribute_Y | hypothesis = NOT(College_X) ))`
+`~ log10( P( evidence = Attribute_Y | hypothesis = College_X )/P( evidence = Attribute_Y )`
+
+The final approximation is a good one because there are 900 colleges in our working set; so the students attending `College_X` are a very small proportion of the entire American student population. Therefore, the probability of finding a student with `Attribute_Y` amongst students *not* at `College_X` is basically the same as finding such a student amongst the entire student population (`College_X` included).
+
+Above, the flip in the propositions on each side of the conditional ("|") when we go from `Odds(H|E)` to probabilities, `P(E|H)`, occurs by applying Bayes' Rule.
+
+#### Estimating the Probabilities
+For some of the probabilities used in approximating the Bayes factors, the probabilities `P( evidence = Attribute_Y | hypothesis = College_X )` are simply the reported proportions in the database. 
+
+But, the main challenge in using Bayes factors as features is computing the final probabilities for attributes for which only moments and quantiles are reported in the database. For such attributes, we first approximate a full probability distribution of students at the college of interest and then apply the proposition. 
+
+Take SAT for example. We are given the mean, median and quartiles for SAT scores of students at each college.  For each college, we fit a model to these values to approximate the continuous distribution of SAT scores of students at the college.  Then, for an attribute such as `Attribute_Y` = "SAT score greater than 1400", we compute `P( evidence = Attribute_Y | hypothesis = College_X )` by simply computing the upper tail probability of SAT with lower limit 1400.  Finally, to compute `P( evidence = Attribute_Y )`, we simply take the weighted average, across all colleges, of the previously calculated conditional probability, where the weighting is simply the proportion of students attending `College_X` amongst all students in our 1100+ college universe. In the database, field `UGDS` is the number of undergraduate students attending the college. So the proportion of all students attending `College_X` is `P( hypothesis = College_X ) = UGDS[College_X]/sum( UGDS[College_X] )`.
+
+For attributes like region and locale, to estimate `P( evidence = Attribute_Y | hypothesis = College_X )`, we define `Attribute_Y` to reflect preference.  So, for, say `Region == 'Great Lakes'`, `Attribute_Y` is "prefers attending college in Great Lakes region".  And, we use our own subjective knowledge to just assume that of the students attending a college in a specific region (or locale), a non-zero proportion of them preferring attending colleges an alternative region (or locale) and that the alternative regions (locales) that are more similar to the one in which the college exists would have a higher proportion of such students than alternatives that are less similar. For regions, similarity is determined by distance -- e.g., Mid-East is more similar to Great Lakes than is Far West. For locales, similarity is determined by character -- i.e., campuses in suburbs of large cities are more similar to those in large cities than are remote rural campuses.
+
+```{r features, echo=FALSE}
+
+#===================================================
+  ### Academics: Completion rates, admissions rates and SAT scores.
+  # Took a look at scaled test scores, but ultimately settled upon the log-normal
+  # fits to SATs below.
+  academics <- student %>% #filter( Year == 2013 ) %>%
+    dplyr::select(Year,unitID,College,UGDS,C150_4_POOLED_SUPP,SAT_25,SAT_AVG,SAT_75,one_of(discNames))
+  
+  
+  # Clumsily fit log-normal distributions to the SAT score quartiles for each school.
+  fr <- function(x,SAT_AVG,SAT_25,SAT_75,probs=c(0.25,0.75)) {
+    sdl <- x[1]
+    q <- qlnorm(p=probs,meanlog=log(SAT_AVG) - sdl^2/2,sdlog=sdl)
+    log(SAT_25/q[1])^2 + log(SAT_75/q[2])^2
+  }
+  getMuSd <- function(SAT_AVG,SAT_25,SAT_75) {
+    probs  <- c(0.25,0.75)
+    SAT_AVG0 <- SAT_AVG
+    if(SAT_75==1600) {
+      probs   <- probs/(0.75+1.0E-5)
+      SAT_AVG <- (SAT_AVG0 - 1600*(1-(0.75+1.0E-5)))/(0.75+1.0E-5)
+    }
+    soln <- optim(c(0.05), fr,lower=1.0E-3,upper=0.2,method='L-BFGS-B',
+                  SAT_AVG=SAT_AVG,SAT_25=SAT_25,SAT_75=SAT_75,probs=probs)
+    sdl  <- soln$par
+    meanlog  <- log(SAT_AVG) - sdl^2/2
+    pSAT_AVG <- exp(meanlog+0.5*sdl^2)
+    q   <- qlnorm(p=probs,meanlog=meanlog,sdlog=sdl)
+    if(SAT_75==1600){
+      pSAT_AVG <- pSAT_AVG*(0.75+1.0E-5) + 1600*(1-(0.75+1.0E-5))
+    }
+    return(c(meanlog=meanlog,sdlog=sdl,pSAT_25=q[1],pSAT_AVG=pSAT_AVG,pSAT_75=q[2]))
+  }
+  
+  # Get the log-normal parameters of the SAT distribution for each school
+  academics <- academics %$% {bind_cols(.,as.data.frame(t(mapply(getMuSd,SAT_AVG,SAT_25,SAT_75))))}
+  academics %>% 
+    filter(Year==2013,grepl('Harvard|Cal.+Inst.+Tech|Mass.+Inst.+Tech|Princeton U|Northwestern U|Cornell U',College)) %>% 
+    arrange(desc(SAT_AVG)) %>%
+    formattable() %>%
+    as.datatable()
+  
+  # Discretize the SAT distributions
+  academics %<>%
+    #filter(!is.na(C150_4_POOLED_SUPP)) %>%
+    mutate(probSchool = UGDS/sum(UGDS),
+           # 20160315: MLT #
+           logPadmit_le800        = plnorm( 800, meanlog, sdlog, log.p = TRUE),
+           logPadmit_gt800le1000  = plnorm(1000, meanlog, sdlog, log.p = TRUE),
+           logPadmit_gt1000le1200 = plnorm(1200, meanlog, sdlog, log.p = TRUE),
+           logPadmit_gt1200le1400 = plnorm(1400, meanlog, sdlog, log.p = TRUE),
+           logPadmit_gt1400       = 0,
+           
+           p_le800        = plnorm( 800,meanlog,sdlog),
+           p_gt800le1000  = plnorm(1000,meanlog,sdlog) - p_le800,
+           p_gt1000le1200 = plnorm(1200,meanlog,sdlog) - plnorm(1000,meanlog,sdlog),
+           p_gt1200le1400 = plnorm(1400,meanlog,sdlog) - plnorm(1200,meanlog,sdlog),
+           p_gt1400       = plnorm(1400,meanlog,sdlog,lower.tail=FALSE),
+           totprob        = p_le800 + p_gt800le1000 + p_gt1000le1200 + p_gt1200le1400 + p_gt1400)
+  
+
+  # Compute Bayes Factors for the discretized SAT score distributions of each school
+  makeBF <- function(x) ifelse(x<=0,-5,log10(x/sum(x*academics$probSchool,na.rm=TRUE))) # Approximate
+  academicsBF <- academics %>% 
+    select(matches('BF_SAT|log|prob|^p_'),one_of(discNames))  %>%
+    lapply(function(x) ifelse(x<=0,log10(1.0E-5),log10(x/sum(x*academics$probSchool,na.rm=TRUE)))) %>%
+    as_data_frame() %>% 
+    setNames(gsub("^p_","SAT_",names(.))) %>%
+    setNames(paste0('BF_',names(.))) %>%
+    bind_cols( academics %>% select(-matches('BF_SAT|log|prob|^p_'),-one_of(discNames)) )
+
+  disciplines <- academics %>% select(one_of(discNames))
+  discEntropy <- data_frame(
+    discBreadth = rowSums(-(disciplines * log(disciplines)),na.rm = TRUE),
+    Year   = academics$Year,
+    unitID = academics$unitID
+  ) %>% 
+    mutate(BF_discBreadth = discBreadth - median(discBreadth))
+  
+  academicsBF %<>% inner_join(discEntropy,by=c('Year','unitID'))
+
+
+  ### College Setting: locale & region.
+  localeNames <- sort(unique(as.character(student$locale)))
+  localeAggregates <- setNames(c(gsub('([^ ]+) ([^ ]+).+','\\1\\2',localeNames[1:3]),
+                                 rep('Rural',3),
+                                 gsub('([^ ]+) ([^ ]+).+','\\1\\2',localeNames[7]),
+                                 rep('Suburb:Small/Midsize & Town:Fringe',2),
+                                 gsub('([^ ]+) ([^ ]+).+','\\1\\2',localeNames[10]),
+                                 'Suburb:Small/Midsize & Town:Fringe',
+                                 gsub('([^ ]+) ([^ ]+).+','\\1\\2',localeNames[12])),localeNames)
+  student %<>% 
+    group_by( unitID ) %>%
+    do(
+      (.) %>% mutate(locale = locale[!is.na(locale)][[1]])
+    ) %>%
+    ungroup() %>%
+    mutate(localeAgg = factor(localeAggregates[as.character(locale)],
+                              levels=c('Rural','Town:Remote','Town:Distant','Suburb:Small/Midsize & Town:Fringe',
+                                       'Suburb:Large','City:Small','City:Midsize','City:Large')))
+  
+  makeBF <- function(x) {x <- 1.0E-9 + x;log10(x/sum(x*settingBF$probSchool,na.rm=TRUE))} # Approximate
+  settingBF <- student %>% 
+    dplyr::select(Year,unitID,College,UGDS,localeAgg,region) %>%
+    mutate(probSchool = UGDS/sum(UGDS))
+  a <- settingBF %$% model.matrix(~localeAgg - 1,data=.)
+  localeColNames <- gsub('^([^:]+):*(.+)$','BF_\\1\\2',colnames(a))
+  colnames(a) <- localeColNames
+  locAbbr <- gsub('^.+Agg(.{4}).+','\\1',colnames(a))
+  
+  # Define similarity factors: This is a subjective probability (based on my opinion) determining how likely a student would attend college in
+  # a locale (col) other than his/her most-preferred locale (row).  So each row sums to 1.
+  fctr <- matrix(c(     1,  0.8, 0.01, 0.0001,
+                      0.8,    1, 0.7 ,   0.01,
+                     0.01,  0.7,    1,    0.8,
+                   0.0001, 0.01,  0.8,      1)/2,nrow=4,ncol=4,byrow=TRUE, 
+                 dimnames=list(key=c('Rura','Town','Subu','City'), other=c('Rura','Town','Subu','City')))
+  # Expand factors to cover all locales.
+  fctr <- fctr[locAbbr,locAbbr]
+  fctr[row(fctr) == col(fctr)] <- 1 # put ones on the diagonal
+  dimnames(fctr) <- list(localeColNames,localeColNames)
+  
+  # Here's a "flattening" transformation so that similarities are essentially
+  # increased (since all elements of fctr are <= 1.)
+  fctr %<>% sqrt 
+  fctr <- fctr / rowSums(fctr)
+  
+  # Reweight the local indicators.
+  a <- a %*% fctr
+  # Convert locale indicators intor psuedo-Bayes factors.
+  a %<>% as.data.frame %>% tbl_df %>% mutate_each(funs(makeBF))
+  
+  
+  settingBF %<>% dplyr::select(-localeAgg) %>% bind_cols(a)
+  
+  #regNames <- c('FarWest','GreatLakes','MidEast','NewEngland','Plains','RockyMountains','Southeast','Southwest')
+  a <- settingBF %>%
+    mutate(regionName = factor(gsub(' ','',as.character(student$region)))) %$% 
+    model.matrix(~regionName - 1,data=.)
+  # Define similarity factors
+  fctrRegion <- matrix(c(1, 0.03, 0.0, 0.0, 0.1, 0.3, 0.0, 0.3,
+                         0.03, 1, 0.3, 0.1, 0.3, 0.1, 0.03, 0.03,
+                         0.0, 0.3, 1,  0.3, 0.01, 0.0, 0.1, 0.0,
+                         0.0, 0.1, 0.3, 1, 0.0, 0.0, 0.0, 0.0,
+                         0.1, 0.3, 0.01, 0.0, 1, 0.3, 0.1, 0.1,
+                         0.3, 0.1, 0.0, 0.0, 0.3, 1, 0.0, 0.3,
+                         0.0, 0.03, 0.1, 0.0, 0.1, 0.0, 1, 0.3,
+                         0.3,0.03, 0.0, 0.0, 0.1, 0.3, 0.3, 1),nrow=8,ncol=8,byrow=TRUE,
+                       dimnames=list(colnames(a),colnames(a)))
+  a <- a %*% fctrRegion
+  colnames(a) <- gsub('^regionName','BF_',colnames(a))
+  a %<>% as.data.frame %>% tbl_df %>% mutate_each(funs(makeBF))
+  settingBF %<>% dplyr::select(-region) %>% bind_cols(a)
+
+  ### Student Aid:
+  aid <- student %>% 
+    dplyr::select(Year,unitID,College,UGDS,matches("pell_ever|fsend")) %>%
+    group_by( unitID ) %>%
+    do(
+      (.) %>% mutate_each(funs(ifelse(is.na(.),(.)[!is.na(.)][[1]],.)),matches("pell_ever|fsend"))
+    ) %>%
+    ungroup() %>%
+    mutate(probSchool = UGDS/sum(UGDS),
+           totprob    = rowSums(as.matrix(.[grepl('fsend',names(.))])))
+  #aid %>% print(n=20)
+  makeBF <- function(x) {x <- 1.0E-9 + x;log10(x/sum(x*aid$probSchool,na.rm=TRUE))} # Approximate
+  aidBF <- aid %>% 
+    dplyr::select(matches("pell_ever|fsend")) %>% 
+    mutate_each(funs(makeBF)) %>% 
+    setNames(paste0("BF_",names(.))) %$%
+    bind_cols(aid %>% dplyr::select(-matches("pell_ever|fsend")),.)
+  
+    
+  # Now combine them all together to form the features data.table.
+  studentBF <-   
+    student %>% select(
+      Year,unitID,College,CollegeType,state,UGDS,C150_4_POOLED_SUPP,TUITIONFEE_IN,TUITIONFEE_OUT,COSTT4_A,
+      contains('md_earn_wne_p6')
+      ) %>%
+    inner_join(settingBF   %>% select(-College,-UGDS,-probSchool), by=c('Year','unitID')) %>%
+    inner_join(academicsBF %>% select(-College,-UGDS,-C150_4_POOLED_SUPP), by=c('Year','unitID')) %>%
+    inner_join(aidBF       %>% select(-College,-UGDS), by=c('Year','unitID')) %>%
+    mutate(BF_prior = log10(nrow(.)*UGDS/sum(UGDS)))
+  # Add interactions...
+  studentBF %<>% 
+    mutate_each(funs(10^(.)),starts_with('BF')) %>% 
+    rename( outcome = Treasury_md_earn_wne_p6) %>%
+    mutate( Year2003 = ifelse(Year==2003,1,0)) %>%
+    mutate( Living_Expenses = COSTT4_A - TUITIONFEE_IN ) %>%
+    mutate( Living_Expenses = (Living_Expenses - mean(Living_Expenses,na.rm=TRUE))/sd(Living_Expenses,na.rm=TRUE)) %>%
+    mutate( topSAT2 = (BF_SAT_gt1400-mean(BF_SAT_gt1400))^2, bottomSAT2 = (BF_SAT_le800-mean(BF_SAT_le800))^2, pell2 = (BF_Treasury_pell_ever-mean(BF_Treasury_pell_ever))^2, 
+            prior2 = (BF_prior-mean(BF_prior,na.rm=TRUE))^2,
+            breadth_health  = -(BF_discBreadth - mean(BF_discBreadth))*(BF_HealthProfessions-mean(BF_HealthProfessions,na.rm=TRUE)),
+            breadth_arts    = -(BF_discBreadth - mean(BF_discBreadth))*(BF_VisualPerforming-mean(BF_VisualPerforming,na.rm=TRUE)),
+            breadth_engg    = -(BF_discBreadth - mean(BF_discBreadth))*(BF_Engineering-mean(BF_Engineering,na.rm=TRUE)),
+            breadth_busmgmt = -(BF_discBreadth - mean(BF_discBreadth))*(BF_BusinessManagement-mean(BF_BusinessManagement,na.rm=TRUE)),
+            breadth_libarts = -(BF_discBreadth - mean(BF_discBreadth))*(BF_LiberalArts-mean(BF_LiberalArts,na.rm=TRUE)),
+            breadth_bio     = -(BF_discBreadth - mean(BF_discBreadth))*(BF_BiologicalBiomedical-mean(BF_BiologicalBiomedical,na.rm=TRUE)),
+            breadth_socsci  = -(BF_discBreadth - mean(BF_discBreadth))*(BF_SocialSciences-mean(BF_SocialSciences,na.rm=TRUE)),
+            breadth_edu     = -(BF_discBreadth - mean(BF_discBreadth))*(BF_Education-mean(BF_Education,na.rm=TRUE)),
+            breadth_eng     = -(BF_discBreadth - mean(BF_discBreadth))*(BF_EnglishLanguage-mean(BF_EnglishLanguage,na.rm=TRUE)),
+            breadth_psych   = -(BF_discBreadth - mean(BF_discBreadth))*(BF_Psychology-mean(BF_Psychology,na.rm=TRUE)),
+            breadth_prks    = -(BF_discBreadth - mean(BF_discBreadth))*(BF_ParksRecreation-mean(BF_ParksRecreation,na.rm=TRUE)),
+            breadth_hmsec   = -(BF_discBreadth - mean(BF_discBreadth))*(BF_HomelandSecurity-mean(BF_HomelandSecurity,na.rm=TRUE))
+    ) 
+```
+
+## Earnings Premium and Value Proposition Calculation
+A true "earnings premium"" cannot be reliably computed from this dataset because we only have earnings data for years 2003 and 2005 years, and all manner of factors are obscured by the way the data are aggregated and the noisiness of values. 
+
+Package `glmnet` is used to estimate a model, including the discrete factor `College_ID` as a fixed effect.  For those
+colleges with a corresponding coefficient included in the model, we use the estimated coefficient as the earnings premium. Many of the colleges drop out of the model. So, as you'll see below, the histogram of earnings premiums looks like a mixture of a spike at zero and a broad normal distribution with tails stretching away from zero in either direction.
+
+### Model to Predict Expected Earnings
+
+First, we use package `glmnet` to fit the model to the median earnings at 6-years after matriculation.
+
+After defining `covariates`, a character vector of the covariate names, we computed the correlation matrix of the columns
+in `studentBF`.  Subsets of the columns were defined by a single multi-valued variable, e.g., `region`, so there's lots
+of collinearity and some pure confounding of interactions with main effects and other interactions. So, we pruned the covariate vector based on a heuristic screening of highly correlated terms in the `model.matrix`.
+
+```{r model,fig.height=8,fig.width=10}
+covariates <- c(
+  "Year2003",
+  "BF_localeAggRural",
+  #"BF_localeAggTownRemote",
+  #"BF_localeAggTownDistant",
+  #"BF_localeAggSuburbSmall/Midsize & Town:Fringe","BF_localeAggSuburbLarge",
+  "BF_localeAggCitySmall",
+  #"BF_localeAggCityMidsize",
+  "BF_localeAggCityLarge",
+  "BF_FarWest(AK,CA,HI,NV,OR,WA)",
+  "BF_GreatLakes(IL,IN,MI,OH,WI)",
+  "BF_MidEast(DE,DC,MD,NJ,NY,PA)",
+  #"BF_NewEngland(CT,ME,MA,NH,RI,VT)",
+  "BF_Plains(IA,KS,MN,MO,NE,ND,SD)",
+  #"BF_RockyMountains(CO,ID,MT,UT,WY)",
+  "BF_Southeast(AL,AR,FL,GA,KY,LA,MS,NC,SC,TN,VA,WV)",
+  "BF_Southwest(AZ,NM,OK,TX)",
+  "BF_SAT_le800",
+  #"BF_SAT_gt800le1000",
+  "BF_SAT_gt1000le1200","BF_SAT_gt1200le1400",
+  "BF_SAT_gt1400",
+  "BF_AgricultureAgriculture",
+  "BF_NaturalResources","BF_ArchitectureRelated",
+  "BF_AreaEthnic","BF_CommunicationJournalism",
+  "BF_CommunicationsTechnologies","BF_ComputerInformation",
+  "BF_PersonalCulinary","BF_Education",
+  "BF_Engineering","BF_EngineeringTechnologies",
+  "BF_ForeignLanguages","BF_FamilyConsumer",
+  "BF_LegalProfessions","BF_EnglishLanguage",
+  "BF_LiberalArts","BF_LibraryScience",
+  "BF_BiologicalBiomedical","BF_MathematicsStatistics",
+  #"BF_MilitaryTechnologies",
+  "BF_MultiInterdisciplinary",
+  "BF_ParksRecreation","BF_PhilosophyReligious",
+  "BF_TheologyReligious","BF_PhysicalSciences",
+  "BF_ScienceTechnologies","BF_Psychology",
+  "BF_HomelandSecurity","BF_PublicAdministration",
+  "BF_SocialSciences","BF_ConstructionTrades",
+  "BF_MechanicRepair","BF_PrecisionProduction",
+  "BF_TransportationMaterials","BF_VisualPerforming",
+  "BF_HealthProfessions","BF_BusinessManagement",
+  "BF_History",
+  "College_ID"
+  #"BF_discBreadth",
+  #"Living_Expenses",
+  #"topSAT2","bottomSAT2"#,
+  # "breadth_health","breadth_arts",
+  # "breadth_engg","breadth_busmgmt",
+  # "breadth_libarts","breadth_bio",
+  # "breadth_socsci","breadth_edu",
+  # "breadth_eng","breadth_psych",
+  # "breadth_prks","breadth_hmsec"
+)
+
+# formula_string <- paste0(
+#   'outcome ~ (.)^2 + ',
+#   paste(sprintf('poly(BF_%s,2)',setdiff(discNames,"MilitaryTechnologies")), collapse="+")
+# )
+#formula_string <- 'outcome ~ (.-College_ID)^2 + College_ID'
+glmdata   <- studentBF %>% 
+  mutate(College_ID = paste(unitID,College,sep="__")) %>% 
+  select(outcome, one_of(covariates) ) %>% 
+  filter(complete.cases(.))
+
+# Try a model with `College` as a fixed effect; and prune out a bunch of correlated stuff.
+model_mat <- model.matrix( outcome ~ (.-College_ID)^2 + College_ID, data=glmdata )
+fcor      <- cor(model_mat[,-1]) - diag(ncol(model_mat)-1)
+nms       <- colnames(fcor)
+hicor     <- nms %>% 
+  sapply(
+    function(nm) {
+      # scan the upper triangle of the correlation matrxi...
+      ihi<-which(abs(fcor[seq_len(which(nms==nm)),nm])>0.8)
+      setNames(fcor[ihi,nm],nms[ihi])
+    } 
+  )
+hicor     <- hicor[sapply(hicor,length)>0]
+
+# Since we know that some of the interactions are confounded with each other and with some main effects,
+# which causes the cross-validation error to blow up, we'll find the models that have fewer terms than
+# those that blow up and plot the cross-validation mean-squared error for them.
+# Range of `lambda` determined by trial and error.
+set.seed( 2393 )
+glmnet_cv <- cv.glmnet(
+  model_mat[,setdiff(colnames(model_mat),names(hicor))], #glmdata %>% select(-outcome) %>% as.matrix(),
+  glmdata %>% select(outcome) %>% as.matrix(),
+  family='gaussian',
+  lambda = exp(seq(log(10),log(100),length.out = 50))
+)
+plot( glmnet_cv )
+
+# # These are the non-zero coefficients for the model using `lambda.1se`.
+# acv %>% coef() %>% {(.)[abs((.)[,1])>0,1]} %>% print()
+# # These are the non-zero coefficients for the model using `lambda.min`.
+# acv %>% coef(s='lambda.min') %>% {(.)[abs((.)[,1])>0,1]} %>% print()
+# These are the non-zero coefficients for the model using the geometric mean of `lambda.min` and `lambda.1se`.
+df_coef <- glmnet_cv %$% 
+  coef(.,s=exp(mean(log(c(lambda.1se,lambda.min))))) %>% 
+  { (.)[abs((.)[,1])>0,1] } %>%
+  { data_frame(Coefficient = names(.), `$/util` = round(.,0)) } 
+df_coef %>%
+  formattable() %>%
+  as.datatable()
+
+
+
+# We use that latter model.
+# It's intercept serves as the grand-mean, i.e., expected earnings of a college after controlling for the covariates
+# and before adding the college's earnings premium.
+Expected_Earnings <- glmnet_cv %$% coef(.,s=exp(mean(log(c(lambda.1se,lambda.min)))))['(Intercept)',]
+print( Expected_Earnings )
+
+```
+
+We now collect the predictions and the earnings premia as determined by the model coefficient for the corresponding
+college.  Any college that does not have a coefficient in the model receives an earnings premium of zero.
+
+
+```{r pred_eprem,warning=FALSE,message=FALSE}
+# And, we make predictions for that model using the geometric mean of `lambda.min` and `lambda.1se`..
+glmnet_pred <- glmnet_cv %$% 
+  predict(.,newx = model_mat[,setdiff(colnames(model_mat),names(hicor))], #glmdata %>% select(-outcome) %>% as.matrix(), 
+  s = exp(mean(log(c(lambda.1se,lambda.min))))
+)
+
+# Collect the predictions in a data table...
+predictions <- data_frame(predicted_earnings = glmnet_pred[,1]) %>% 
+  bind_cols(
+    studentBF %>% 
+      select(Year,unitID,College,outcome, one_of(setdiff(covariates,'College_ID')) ) %>% 
+      filter(complete.cases(.))
+  ) %>% 
+  select(Year,unitID,College,outcome,predicted_earnings)
+
+predictions %>%
+  mutate( College = sprintf("%s,%d",College,Year) ) %>%
+  {
+    ggplot(., aes(x=predicted_earnings,y=outcome)) +
+      geom_point() +
+      geom_abline(intercept = 0, slope = 1, color = 'red', linetype = 2, size = 1) +
+      geom_text(aes(label = College ), size=2, alpha=0.3 ) +
+      ggtitle('Median earnings of students working and not enrolled 6 years after entry') +
+      labs(
+        x = 'Predicted ($/yr)',
+        y = 'Observed ($/yr)'
+      )
+  }
+
+
+epremium <- df_coef %>% 
+  filter(grepl('^College',Coefficient)) %>% 
+  mutate(
+    unitID = gsub('.+ID([0-9]+)__.+','\\1',Coefficient) %>% as.integer(),
+    College = gsub('^College_ID.+__','',Coefficient)
+  ) %>% 
+  rename(earnings_premium = `$/util`) %>% 
+  right_join(student %>% filter(Year==2013) %>% select(unitID,College,SAT_AVG)) %>%
+  left_join( student %>% filter(Year==2005) %>% select(unitID,Treasury_md_earn_wne_p6)) %>%
+  rename(outcome = Treasury_md_earn_wne_p6) %>%
+  mutate( earnings_premium=ifelse(is.na(earnings_premium),0,earnings_premium) ) %>% 
+  left_join( predictions %>% filter(Year==2005)) %>%
+  select( -Coefficient, -Year ) %>%
+  select(unitID,College,everything())
+
+```
+
+
+### Plots of the Earnings Premium
+
+First, plot the histogram of earnings premia, demonstrating, as
+mentioned above mixture of zero and non-zero premia.
+
+```{r eprem_plots1,fig.height=8,fig.width=10}
+
+epremium %>% 
+{
+  ggplot(.,aes(x=earnings_premium)) + 
+    geom_histogram(fill='red',alpha=0.3,binwidth = 500) +
+    ggtitle('Earnings Premium Distribution') +
+    labs( x = 'Earnings Premium [$]' )
+}
+```
+
+Plot a bar chart, with the colleges ordered by average SAT score, so we can
+see how the colleges sort out.  
+
+(Interestingly, it still looks like some of the more tech-oriented
+colleges have positive premia while more liberal-arts-oriented colleges have negative premia,
+even though we explictly attempted to model the impact of degree distribution at each college.
+Probably an illustration of the limitations of this approach. Also, a reminder of the fact that
+value from a college education can't be measured in earnings alone.)
+
+```{r eprem_plots2,fig.height=8,fig.width=10}
+
+epremium %>% 
+  arrange(desc(SAT_AVG)) %>% 
+  mutate(College = sprintf('%d. %s',seq_len(nrow(.)),gsub('University','U',College))) %>% 
+  mutate(College=factor(College,levels=College)) %>% 
+  mutate( tval = earnings_premium/sd(earnings_premium) ) %>%
+  slice( seq_len(100) ) %>%
+  #filter(tval<5) %>%
+  {
+    ggplot(., aes(x=College,y=tval,fill=College)) +
+      geom_bar(position='dodge',stat='identity') +
+      #scale_y_continuous(limits=c(-4,4)) +
+      ggtitle( "Earnings Premium" ) +
+      labs( y = 'Standardized Earnings Premium\n ( (Earnings - Predicted Earnings)/Standard Error )') +
+      theme(axis.text.x=element_text(angle = 90, vjust = 0.5,hjust = 1),legend.position = 'none')
+  }
+```
+
+## Value Proposition
+
+Value proposition is defined as the adjusted earnings divided by the expected costs for a household of the student's
+specific income level, thus level of financial need. (Of course, other factors dictate financial need. Here, decreasing
+annual household income of the students in a cohort is the best we have as an indicator of the financial need of those
+students.)
+
+Adjusted earnings is defined as the (grand mean) expected earnings plus the earnings premium for the college multiplied
+by the completion rate of the college.  I.e., we assume completion rate is the probability of a student graduating from
+the college. Then the expected earnings would be this probability multiplied by the earnings of a graduated plus the
+quantity one minus this probability multiplied by the earnings of non-graduates, which for this analysis, 
+we assume to be zero. So these values will, obviously, tend to under-estimate the actual estimated earnings
+(even after our controlling for the covariates in the model).
+
+**Again, this is more an exploration into roughly how the colleges sort out rather than anywhere near a 
+determination of the actual value represented by a college degree from any of the colleges.**
+
+```{r value_funcs }
+
+makeStudentValue <- function(studentBF,epremium,residence_state, income_bracket='gt48Kle75K',sat_lvl='gt1000le1200',unthresh=0 ){
+  student_value <- studentBF %>% select(-College,-outcome,-matches('Treasury|pell|Year2003')) %>%
+    filter( Year == 2013 ) %>% 
+    left_join( student %>% select(Year,unitID, starts_with('NPT')), by = c('Year','unitID' ))  %>%
+    left_join( epremium, by = 'unitID' ) %>%
+    mutate( 
+      Utility = switch(
+        sat_lvl,
+        gt1400       = BF_SAT_gt1400,
+        gt1200le1400 = BF_SAT_gt1200le1400,
+        gt1000le1200 = BF_SAT_gt1000le1200,
+        gt800le1000  = BF_SAT_gt800le1000,
+        le800        = BF_SAT_le800
+      )
+    ) %>% 
+    arrange( desc(Utility) ) %>%
+    mutate(
+      ntp1 = ifelse(grepl('Public',CollegeType),NPT41_PUB,NPT41_PRIV),
+      ntp2 = ifelse(grepl('Public',CollegeType),NPT42_PUB,NPT42_PRIV),
+      ntp3 = ifelse(grepl('Public',CollegeType),NPT43_PUB,NPT43_PRIV),
+      ntp4 = ifelse(grepl('Public',CollegeType),NPT44_PUB,NPT44_PRIV),
+      ntp5 = ifelse(grepl('Public',CollegeType),NPT45_PUB,NPT45_PRIV)
+    ) %>%
+    select( -starts_with('NPT4',ignore.case=FALSE)) %>%
+    #filter( complete.cases(.) ) %>%
+    mutate(
+      INSTATE = state == residence_state,
+      Living_Expenses = COSTT4_A - TUITIONFEE_IN,
+      maxcost = Living_Expenses + ifelse(INSTATE,TUITIONFEE_IN,TUITIONFEE_OUT),
+      ntp  = switch(
+        income_bracket,
+        le30K       = ntp1,
+        gt30Kle48K  = ntp2,
+        gt48Kle75K  = ntp3,
+        gt75Kle110K = ntp4,
+        gt110K      = ntp5
+      ),
+      Earnings_Adjusted = (Expected_Earnings + earnings_premium)*C150_4_POOLED_SUPP, # Assumes all remaining unexplained earnings are due to a premium.
+      inccost = ifelse( INSTATE, ntp, ntp + TUITIONFEE_OUT - TUITIONFEE_IN),
+      unorm = Utility/max(Utility), #10^(Utility-max(Utility)),
+      cnorm  = maxcost/Living_Expenses,
+      c2norm = inccost/Living_Expenses,
+      vnorm = (Earnings_Adjusted/Living_Expenses) / (Earnings_Adjusted[[1]]/Living_Expenses[[1]]), # Earnings normalized by that of the highest utility school.
+      value_prop1 = vnorm/cnorm, #unorm*vnorm/cnorm,
+      value_prop2 = vnorm/c2norm, #unorm*vnorm/c2norm,
+      College = sprintf("%d. %s", order(Utility,decreasing=TRUE), gsub('University','U',College) )
+    ) %>% 
+    filter( unorm>unthresh, value_prop2 < 2*value_prop2[[1]]) %>%
+    mutate(
+      maxv2 = max(value_prop2[unorm>unthresh]),
+      value_prop1 = value_prop1/maxv2,  #ifelse(scale_independently,max(value_prop1),max(value_prop2)),
+      value_prop2 = value_prop2/maxv2
+    ) %>%
+    #filter(value_prop2 < 4 & vnorm < 2 ) %>%
+    gather( key = aid, value = value_prop, value_prop1, value_prop2 ) %>%
+    mutate( 
+      cost = ifelse( aid == 'value_prop1', maxcost, ntp ),
+      coll_label = sprintf("%s,\n$%.1fK/$%.1fK",gsub("^(.+)[^a-zA-Z]+Main Campus","\\1",College),Earnings_Adjusted/1000,cost/1000)
+    ) %>%
+    mutate( aid = ifelse( aid == 'value_prop1', "WITHOUT Financial Aid", "WITH Financial Aid" ) %>% factor(levels=c("WITHOUT Financial Aid","WITH Financial Aid")) )
+}
+
+
+plotValue <- function( stdt_val, residence_state, sat_lvl, income_bracket, scale_independently = FALSE, unthresh = 0, cost_thresh = 70000, earnings_thresh = 0 ){
+  xlims <- c(pmax(unthresh,floor(min(stdt_val$unorm)/0.1)*0.1)-0.05,1.15)
+  stdt_val %>%
+    filter( unorm > unthresh, cost < cost_thresh, Earnings_Adjusted > earnings_thresh ) %>%
+    {
+      ggplot(., aes( x = unorm, y = value_prop, color = CollegeType ) ) + 
+        geom_point() + 
+        geom_text( aes( label = coll_label), vjust = 1.0, size = 3 ) +
+        scale_x_continuous( limits = xlims, breaks = seq(xlims[1]+0.05,xlims[2]-0.05,by=0.10) ) +
+        ggtitle( 
+          label    = sprintf('Value Proposition With & Without Financial Aid (for %s resident, SAT = %s, Income = %s)',residence_state, sat_lvl, income_bracket ), 
+          subtitle = paste(
+            'Value Proposition = Adjusted Earnings/Costs',
+            sprintf('Earnings > $%2.1fK, Cost < $%2.1fK', earnings_thresh/1000, cost_thresh/1000),
+            sep = "; "
+          )
+        ) +
+        labs( 
+          x = sprintf('Normalized Utility: Suitability for student with SAT level %s',sat_lvl), 
+          y = ifelse(scale_independently,'Value Proposition (scaled independently)','Value Proposition')
+        ) +
+        facet_wrap( ~ aid, scales = ifelse(scale_independently,'free','fixed') ) +
+        theme( text = element_text( face = 'bold' ) )
+    }
+}
+
+```
+
+
+### Case: High-SAT, High-Income (i.e., Low-Financial-Need)
+
+Here's the calculation for an Ohio resident from a high-income household 
+(greater than $110,000/yr) and whose SAT score is at the highest level, greater than 1400.
+
+```{r val_prop_hi_SAT,fig.height=8,fig.width=10}
+
+res_state <- 'Ohio'
+sat_level <- 'gt1400'
+inc_level <- 'gt110K'
+student_value <- makeStudentValue( 
+  studentBF, 
+  epremium, 
+  residence_state = res_state,
+  sat_lvl         = sat_level,
+  income_bracket  = inc_level 
+)
+ethresh <- quantile( student_value$Earnings_Adjusted[1:30], 0.04 )
+student_value %>% 
+  plotValue( 
+    residence_state = res_state, 
+    sat_lvl         = sat_level,
+    income_bracket  = inc_level,
+    earnings_thresh = ethresh 
+  )
+
+```
+
+
+### Case: Low-SAT, High-Income (i.e., Low-Financial-Need)
+
+And here's the calculation for an Ohio resident from a high-income household 
+(greater than $110,000/yr) and whose SAT score is at the lowest level, less than 800. 
+
+Notice how the adjusted earnings shown in the data point labels are significantly lower than those
+of the previous plot: In aggregate, the academic ability of a college's students is a strong predictor 
+of the future earnings of the students. (Says nothing about any individual's case.) 
+Also, see how financial aid makes the private colleges competitive in value
+to the public colleges by reducing the net price in the denominator of the formula.
+
+```{r val_prop_low_SAT, echo=FALSE,fig.height=8,fig.width=10 }
+
+res_state <- 'Ohio'
+sat_level <- 'le800'
+inc_level <- 'gt110K'
+student_value <- makeStudentValue( 
+  studentBF, 
+  epremium, 
+  residence_state = res_state,
+  sat_lvl         = sat_level,
+  income_bracket  = inc_level 
+)
+ethresh   <- quantile( student_value$Earnings_Adjusted[1:30], 0.04 )
+student_value %>% 
+  plotValue( 
+    residence_state = res_state, 
+    sat_lvl         = sat_level,
+    income_bracket  = inc_level, 
+    earnings_thresh = ethresh 
+  )
+```
+
+### Case: High-SAT, Low-Income (i.e., High-Financial-Need)
+
+Here's the calculation for an Ohio resident from a low-income household 
+(less than or equal to $30,000/yr) and whose SAT score is at the highest level, greater than 1400. 
+
+Notice how financial aid makes attending an elite private college a fantastic value for such a student.
+
+```{r val_prop_hi_SAT_hi_need, echo=FALSE,fig.height=8,fig.width=10 }
+res_state <- 'Ohio'
+sat_level <- 'gt1400'
+inc_level <- 'le30K'
+student_value <- makeStudentValue( 
+  studentBF, 
+  epremium, 
+  residence_state = res_state,
+  sat_lvl         = sat_level,
+  income_bracket  = inc_level 
+)
+ethresh   <- quantile( student_value$Earnings_Adjusted[1:30], 0.04 )
+student_value %>% 
+  plotValue( 
+    residence_state = res_state, 
+    sat_lvl         = sat_level,
+    income_bracket  = inc_level, 
+    earnings_thresh = ethresh 
+  )
+```
+
+### Value Proposition Given Student's SAT Level and Financial Need Levels
+
+Rather than continue plotting individual cases, sweep over SAT levels and financial need levels (i.e.,
+houshold income levels) to create a lattice of plots.
+
+
+```{r value_all,warning=FALSE}
+sat_levels      <- c('le800','gt800le1000','gt1000le1200','gt1200le1400','gt1400')
+income_levels   <- c('le30K','gt30Kle48K','gt48Kle75K','gt75Kle110K','gt110K','no_aid') %>% rev()
+residence_state <- 'Ohio'
+unthresh <- 0.4
+student_value_all <- 
+  income_levels %>% lapply(
+    function(income_bracket){
+      sat_levels %>% lapply(
+        function(sat_lvl){
+          studentBF %>% select(-College,-outcome,-matches('Treasury|pell|Year2003')) %>%
+            filter( Year == 2013 ) %>% 
+            left_join( student %>% select(Year,unitID, starts_with('NPT')), by = c('Year','unitID' ))  %>%
+            left_join( epremium, by = 'unitID' ) %>%
+            mutate( 
+              Utility = switch(
+                sat_lvl,
+                gt1400       = BF_SAT_gt1400,
+                gt1200le1400 = BF_SAT_gt1200le1400,
+                gt1000le1200 = BF_SAT_gt1000le1200,
+                gt800le1000  = BF_SAT_gt800le1000,
+                le800        = BF_SAT_le800
+              )
+            ) %>% 
+            arrange( desc(Utility) ) %>%
+            mutate(
+              ntp1 = ifelse(grepl('Public',CollegeType),NPT41_PUB,NPT41_PRIV),
+              ntp2 = ifelse(grepl('Public',CollegeType),NPT42_PUB,NPT42_PRIV),
+              ntp3 = ifelse(grepl('Public',CollegeType),NPT43_PUB,NPT43_PRIV),
+              ntp4 = ifelse(grepl('Public',CollegeType),NPT44_PUB,NPT44_PRIV),
+              ntp5 = ifelse(grepl('Public',CollegeType),NPT45_PUB,NPT45_PRIV)
+            ) %>%
+            select( -starts_with('NPT4',ignore.case=FALSE)) %>%
+            filter( !is.na(ntp1),!is.na(ntp2),!is.na(ntp3),!is.na(ntp4),!is.na(ntp5) ) %>%
+            mutate(
+              INSTATE = state == residence_state,
+              Living_Expenses = COSTT4_A - TUITIONFEE_IN,
+              maxcost = Living_Expenses + ifelse(INSTATE,TUITIONFEE_IN,TUITIONFEE_OUT),
+              ntp  = switch(
+                income_bracket,
+                le30K       = ntp1,
+                gt30Kle48K  = ntp2,
+                gt48Kle75K  = ntp3,
+                gt75Kle110K = ntp4,
+                gt110K      = ntp5,
+                no_aid      = maxcost
+              ),
+              Earnings_Adjusted = (Expected_Earnings + earnings_premium)*C150_4_POOLED_SUPP, # Assumes all remaining unexplained earnings are due to a premium.
+              inccost = ifelse( INSTATE, ntp, ntp + TUITIONFEE_OUT - TUITIONFEE_IN),
+              unorm = Utility/max(Utility), #10^(Utility-max(Utility)),
+              cnorm  = inccost/Living_Expenses,
+              vnorm = (Earnings_Adjusted/Living_Expenses) / (Earnings_Adjusted[[1]]/Living_Expenses[[1]]), # Earnings normalized by that of the highest utility school.
+              value_prop = vnorm/cnorm, #unorm*vnorm/cnorm,
+              coll_rank = order( Utility, decreasing = TRUE ),
+              College = sprintf("%d. %s", coll_rank, gsub('University','U',College) )
+            )  %>%
+            #filter(value_prop2 < 4 & vnorm < 2 ) %>%
+            mutate( 
+              cost = ntp,
+              coll_label = sprintf("%s,\n($%.1fK/$%.1fK; %.0f%%)",gsub("^(.+)[^a-zA-Z]+Main Campus","\\1",College),Earnings_Adjusted/1000,cost/1000,C150_4_POOLED_SUPP*100), 
+              SAT  = factor( sat_lvl, levels = sat_levels ), 
+              Need = factor( income_bracket, levels = income_levels ) 
+            )
+        }
+      )
+    }
+  ) %>%
+  unlist( recursive = FALSE ) %>%
+  { do.call( bind_rows, . ) } %>% 
+  #filter( unorm>unthresh, value_prop2 < 2*value_prop2[[1]]) %>%
+  # mutate(
+  #   maxv = quantile(value_prop[unorm>unthresh],0.99), 
+  #   value_prop = value_prop/maxv  #ifelse(scale_independently,max(value_prop1),max(value_prop2)),
+  # ) %>%
+  filter( value_prop < 10 ) # To avoid outliers
+```
+
+The following plots sweep across SAT level, as columns, and financial need level, 
+as rows. Again, as above, the plots are for a resident of Ohio, so out-of-state 
+tuition and fees apply for public schools outside of Ohio. 
+
+(You can fork the script and edit it to test with different states as that in which the student resides.)
+
+
+```{r val_all_plots1,warning=FALSE,fig.height=10,fig.width=11}
+scale_independently <- TRUE
+
+rank_thresh <- 50
+cost_thresh <- 100000
+earnings_thresh <- 0.0
+
+student_value_all %>%
+  filter( coll_rank <= rank_thresh ) %>%
+  group_by( SAT ) %>%
+  filter( coll_rank<=10 | (coll_rank>10 & Earnings_Adjusted>earnings_thresh & cost < cost_thresh)  ) %>%
+  ungroup() %>%
+  {
+    ggplot(., aes( x = unorm, y = value_prop, color = CollegeType ) ) + 
+      geom_point( na.rm = TRUE ) + 
+      scale_x_continuous(limits = c(unthresh-0.1,1.1), breaks = seq(unthresh-0.1,1.1,by=0.1)) + 
+      geom_text( aes( label = coll_label), vjust = 1.0, size = 3, na.rm = TRUE ) +
+      ggtitle( 
+        label    = sprintf('Value Proposition (for %s resident)',residence_state), 
+        subtitle = paste(
+          'Value Proposition = Adjusted Earnings/Costs',
+          sprintf('Earnings > $%2.1fK, Cost < $%2.1fK', earnings_thresh/1000, cost_thresh/1000),
+          sep = "; "
+        )
+      ) +
+      labs( 
+        x = 'Normalized Utility (Suitability for student at SAT level)', 
+        y = ifelse(scale_independently,'Value Proposition (scaled independently)','Value Proposition')
+      ) +
+      theme( text = element_text( face = 'bold' ) ) +
+      facet_grid( 
+        Need ~ SAT, 
+        scales = ifelse(scale_independently,'free','fixed'),
+        labeller = label_both
+      )
+  }
+```
+
+Now the same plot but with the y-axes fixed.
+
+```{r val_all_plots2,warning=FALSE,fig.height=10,fig.width=11,echo=FALSE}
+scale_independently <- FALSE
+
+rank_thresh <- 50
+cost_thresh <- 100000
+earnings_thresh <- 0.0
+
+student_value_all %>%
+  filter( coll_rank <= rank_thresh ) %>%
+  group_by( SAT ) %>%
+  filter( coll_rank<=10 | (coll_rank>10 & Earnings_Adjusted>earnings_thresh & cost < cost_thresh)  ) %>%
+  ungroup() %>%
+  {
+    ggplot(., aes( x = unorm, y = value_prop, color = CollegeType ) ) + 
+      geom_point( na.rm = TRUE ) + 
+      scale_x_continuous(limits = c(unthresh-0.1,1.1), breaks = seq(unthresh-0.1,1.1,by=0.1)) + 
+      geom_text( aes( label = coll_label), vjust = 1.0, size = 3, na.rm = TRUE ) +
+      ggtitle( 
+        label    = sprintf('Value Proposition (for %s resident)',residence_state), 
+        subtitle = paste(
+          'Value Proposition = Adjusted Earnings/Costs',
+          sprintf('Earnings > $%2.1fK, Cost < $%2.1fK', earnings_thresh/1000, cost_thresh/1000),
+          sep = "; "
+        )
+      ) +
+      labs( 
+        x = 'Normalized Utility (Suitability for student at SAT level)', 
+        y = ifelse(scale_independently,'Value Proposition (scaled independently)','Value Proposition')
+      ) +
+      theme( text = element_text( face = 'bold' ) ) +
+      facet_grid( 
+        Need ~ SAT, 
+        scales = ifelse(scale_independently,'free','fixed'),
+        labeller = label_both
+      )
+  }
+```
+
+Finally, plot the lattice one more time, allowing the y-axis of every plot to move independently.
+
+```{r val_all_plots3,warning=FALSE,fig.height=10,fig.width=11,echo=FALSE}
+scale_independently <- TRUE
+
+cost_thresh <- 100000
+earnings_thresh <- 0
+rank_thresh <- 50
+
+# Always plot the top-10, regardless of earnings
+student_value_all %>%
+  filter( coll_rank <= rank_thresh ) %>%
+  group_by( SAT ) %>%
+  filter( coll_rank<=10 | (coll_rank>10 & Earnings_Adjusted>earnings_thresh & cost < cost_thresh)  ) %>%
+  ungroup() %>%
+  {
+    ggplot(., aes( x = unorm, y = value_prop, color = CollegeType ) ) + 
+      geom_point( na.rm = TRUE ) + 
+      scale_x_continuous(limits = c(unthresh-0.1,1.1), breaks = seq(unthresh-0.1,1.1,by=0.1)) + 
+      geom_text( aes( label = coll_label), vjust = 1.0, size = 3, na.rm = TRUE ) +
+      ggtitle( 
+        label    = sprintf('Value Proposition (for %s resident)',residence_state), 
+        subtitle = paste(
+          'Value Proposition = Adjusted Earnings/Costs',
+          sprintf('Rank <= %d, Earnings >=top-quartile, Cost < $%2.1fK', rank_thresh, cost_thresh/1000),
+          sep = "; "
+        )
+      ) +
+      labs( 
+        x = 'Normalized Utility (Suitability for student at SAT level)', 
+        y = ifelse(scale_independently,'Value Proposition (scaled independently)','Value Proposition')
+      ) +
+      theme( text = element_text( face = 'bold' ) ) +
+      facet_wrap( 
+        Need ~ SAT, 
+        ncol = 5,
+        nrow = 6,
+        scales = ifelse(scale_independently,'free','fixed'),
+        labeller = label_both
+      )
+  }
+```
+### Interpretation
+
+The labeling of the rows by "Need" includes the income bracket to which the 
+student's household belongs.
+In other words, the panels in that row correspond to the value proposition for a student whose
+need level is typical for a household of that income bracket. The top row corresponds to a
+need level of "no_aid", meaning the household is wealthy enough to not qualify for any
+financial aid and would pay the full cost of tuition, fees and living expenses.
+
+Note that within a row, the y-coordinate of the college, which is the value proposition
+estimated for any specific college given the financial need level specified for that row, 
+does not change. That y-value for
+a given college stays the same as SAT level changes because the inputs to the value proposition
+equation -- the adjusted earnings, the costs at that row's need level, and the completion rate 
+-- are only properties of the college and not the student and therefore they all stay the same
+as the student's SAT level changes.
+But a different mix of colleges appears in each panel within a row because 
+only the top-100 colleges, in terms of suitability as determined by the Bayes factor 
+at that row's SAT level, are included in each panel, and they change with change in SAT level. 
+
+Also note, that within a column, the x-coordinate of a college, which is the suitability of the
+school for a student scoring at the SAT level specified for that column, does not change.
+Of course the y-values do change because the estimated costs, which is the denominator in the
+value proposition equation, decreases with increasing financial need.
+
+You can see that the value proposition stays roughly the same as we increase SAT level, 
+moving across the columns from left to right. Also, as student SAT level increases, 
+the mix of suitable colleges transitions from many public colleges to primarily 
+the elite private colleges, like the Ivies, MIT, CalTech,
+Stanford, etc.The fact that the mix of colleges also changes
+with SAT level indicates that for each level of student ability, there is a set of colleges
+that fit right into the economic niche to serve them.  However, there is a bit of a dip
+in value proposition in the middle column, corresponding to students from households with
+incomes near the median American income. This issue might be a cause for concern in our 
+nation.... 
+
+Also, the adjusted earnings (shown in the data point labels) for the colleges 
+populating the panels in the leftmost 
+columns are significantly lower than those for the colleges populating the panels in the 
+rightmost columns. This indicates that the expected earnings for low-SAT students are 
+dramatically lower than those of high-SAT students. (Because we adjust the earnings to account
+for the SAT distribution at each college, this drop in adjusted earnings for the low-SAT
+students is driven mainly by dramatically lower completion rates at the colleges most suitable
+for them that at the colleges for high-SAT students.)
+
+The value proposition increases dramatically as we increase the financial need
+level, moving down the rows from top to bottom.  As more and more financial aid kicks in, the 
+costs of the colleges drop significantly (while adjusted earnings and completion rates 
+for each school stay constant).  In fact the value proposition for a high-achieving student, 
+at SAT level greater than 1400, who comes from a household with great financial aid, at income
+level less than $30,000/yr, the Ivy League schools pose an unparallel value proposition at the
+highest suitability levels for that student.
+
+## Caveats
+
+The underlying dataset and the methods
+applied here really **are not** suitable for drawing any strong conclusions about the
+value proposition of a specific college for a specific student.
+This analysis merely demonstrates some of the considerations one might need to address 
+in investigating the value proposition of colleges. It would be interesting to see how the
+quick-and-dirty results shown here compare to a more rigorous analysis and to published sources of
+value comparisons and value rankings of colleges.
+
+Hope you found this to be interesting and it prompts you to dig deeper and to do more....
+
+
+## Copyright Notice
+
+=======================================================================================    
+Copyright 2017 Michael L. Thompson    
+=======================================================================================    
+"collegeValue.Rmd" reapplies portions of 
+"BestCollegeforYou_KaggleSubmission.Rmd" originally submitted to the kaggle.com
+competition "US Dept of Education: College Scorecard" under the Apache License, v. 2.0.
+at https://www.kaggle.com/apollostar/d/kaggle/college-scorecard/which-college-is-best-for-you
+
+=======================================================================================    
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+=======================================================================================
+>>>>>>> parent of 765cc05... Folder structuring:collegeValue2.Rmd
