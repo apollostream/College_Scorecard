@@ -71,7 +71,7 @@ WHERE Year=",year
 
 fieldNames <-
   c(
-    'UGDS',
+    'UGDS','UGDS_WHITE','UGDS_BLACK','UGDS_HISP','UGDS_ASIAN','UGDS_NRA',
     "pell_ever",
     "fsend_1","fsend_2","fsend_3","fsend_4","fsend_5",
     "COSTT4_A",
@@ -150,11 +150,11 @@ allfields <- dbListFields( db, tables[[1]][1] )
 queryStringDscplns <- makeQuery( 2003, discgrp$VARIABLE.NAME, discNames )
 disciplines2003 <- dbGetQuery( db, queryStringDscplns ) %>% 
   tbl_df() %>% 
-  mutate_each( funs(as.numeric), one_of(discNames) ) 
+  mutate_at( .funs=funs(as.numeric), .vars =vars( one_of(discNames) ) ) 
 queryStringDscplns <- makeQuery( 2005, discgrp$VARIABLE.NAME, discNames )
 disciplines2005 <- dbGetQuery( db, queryStringDscplns ) %>% 
   tbl_df() %>% 
-  mutate_each( funs(as.numeric), one_of(discNames) ) 
+  mutate_at( .funs=funs(as.numeric), .vars = vars(one_of(discNames) ) )
 # queryStringDscplns <- makeQuery( 2012, discgrp$VARIABLE.NAME, discNames )
 # disciplines2012 <- dbGetQuery( db, queryStringDscplns ) %>% 
 #   tbl_df() %>% 
@@ -162,7 +162,7 @@ disciplines2005 <- dbGetQuery( db, queryStringDscplns ) %>%
 queryStringDscplns <- makeQuery( 2013, discgrp$VARIABLE.NAME, discNames )
 disciplines2013 <- dbGetQuery( db, queryStringDscplns ) %>% 
   tbl_df() %>% 
-  mutate_each( funs(as.numeric), one_of(discNames) ) 
+  mutate_at( .funs=funs(as.numeric), .vars = vars( one_of(discNames) ) )
 #disciplines2013 %>% select(20:25) %>% print()
 
 # Get Treasury data about students' families.
@@ -250,7 +250,7 @@ student %<>%
    # !grepl('^Special Focus.+Theological',ccbasic)#, #!isTheological,
     #!is.na(md_earn_wne_p6)
   ) %>%
-  mutate_each(funs(ifelse(is.na(.),Treasury_md_earn_wne_p6,.)), starts_with('Treasury_mn_earn_wne_'))
+  mutate_at(.funs=funs(ifelse(is.na(.),Treasury_md_earn_wne_p6,.)), .vars=vars(starts_with('Treasury_mn_earn_wne_')))
 
 student %<>% makeNumsFactors()
 
@@ -282,6 +282,7 @@ student %<>%
 ```
 
 ### Feature Engineering: Bayes Factors
+
 Approximate Bayes factors serve as the features of the model. The Bayes factor is the ratio of the posterior-odds of the hypothesis (i.e., after receiving the evidence) to the prior-odds of the hypothesis (i.e., before seeing the evidence).  The evidence is the attribue of a student -- like "SAT score greater than 1400"" -- and the hypothesis is attendance at the college. (There may not be a compelling reason to do this, but informal testing in other applications indicates a greater ability to distinguish amongst the colleges in the Bayes factors feature space than in the raw variable space.)
 
 Compute the following for the feature corresponding to attribute `Attribute_Y` for each college of interest `College_X` (we use log-base 10 on the Bayes factor.):
@@ -296,6 +297,7 @@ The final approximation is a good one because there are 900 colleges in our work
 Above, the flip in the propositions on each side of the conditional ("|") when we go from `Odds(H|E)` to probabilities, `P(E|H)`, occurs by applying Bayes' Rule.
 
 #### Estimating the Probabilities
+
 For some of the probabilities used in approximating the Bayes factors, the probabilities `P( evidence = Attribute_Y | hypothesis = College_X )` are simply the reported proportions in the database. 
 
 But, the main challenge in using Bayes factors as features is computing the final probabilities for attributes for which only moments and quantiles are reported in the database. For such attributes, we first approximate a full probability distribution of students at the college of interest and then apply the proposition. 
@@ -435,7 +437,7 @@ For attributes like region and locale, to estimate `P( evidence = Attribute_Y | 
   # Reweight the local indicators.
   a <- a %*% fctr
   # Convert locale indicators intor psuedo-Bayes factors.
-  a %<>% as.data.frame %>% tbl_df %>% mutate_each(funs(makeBF))
+  a %<>% as.data.frame %>% tbl_df %>% mutate_all(funs(makeBF))
   
   
   settingBF %<>% dplyr::select(-localeAgg) %>% bind_cols(a)
@@ -456,7 +458,7 @@ For attributes like region and locale, to estimate `P( evidence = Attribute_Y | 
                        dimnames=list(colnames(a),colnames(a)))
   a <- a %*% fctrRegion
   colnames(a) <- gsub('^regionName','BF_',colnames(a))
-  a %<>% as.data.frame %>% tbl_df %>% mutate_each(funs(makeBF))
+  a %<>% as.data.frame %>% tbl_df %>% mutate_all(funs(makeBF))
   settingBF %<>% dplyr::select(-region) %>% bind_cols(a)
 
   ### Student Aid:
@@ -464,7 +466,7 @@ For attributes like region and locale, to estimate `P( evidence = Attribute_Y | 
     dplyr::select(Year,unitID,College,UGDS,matches("pell_ever|fsend")) %>%
     group_by( unitID ) %>%
     do(
-      (.) %>% mutate_each(funs(ifelse(is.na(.),(.)[!is.na(.)][[1]],.)),matches("pell_ever|fsend"))
+      (.) %>% mutate_at(.funs=funs(ifelse(is.na(.),(.)[!is.na(.)][[1]],.)),.vars=vars(matches("pell_ever|fsend")))
     ) %>%
     ungroup() %>%
     mutate(probSchool = UGDS/sum(UGDS),
@@ -473,7 +475,7 @@ For attributes like region and locale, to estimate `P( evidence = Attribute_Y | 
   makeBF <- function(x) {x <- 1.0E-9 + x;log10(x/sum(x*aid$probSchool,na.rm=TRUE))} # Approximate
   aidBF <- aid %>% 
     dplyr::select(matches("pell_ever|fsend")) %>% 
-    mutate_each(funs(makeBF)) %>% 
+    mutate_all(funs(makeBF)) %>% 
     setNames(paste0("BF_",names(.))) %$%
     bind_cols(aid %>% dplyr::select(-matches("pell_ever|fsend")),.)
   
@@ -490,7 +492,7 @@ For attributes like region and locale, to estimate `P( evidence = Attribute_Y | 
     mutate(BF_prior = log10(nrow(.)*UGDS/sum(UGDS)))
   # Add interactions...
   studentBF %<>% 
-    mutate_each(funs(10^(.)),starts_with('BF')) %>% 
+    mutate_at(.funs=funs(10^(.)),.vars=vars(starts_with('BF')) ) %>% 
     rename( outcome = Treasury_md_earn_wne_p6) %>%
     mutate( Year2003 = ifelse(Year==2003,1,0)) %>%
     mutate( Living_Expenses = COSTT4_A - TUITIONFEE_IN ) %>%
@@ -654,51 +656,31 @@ Let's plot the colleges in 2-D space to see if we can find patterns.
 set.seed( 191 )
 # system.time( 
 #   { 
-    tsne_out <- Rtsne( model_mat[model_mat[,'Year2003']==0,!grepl('College',df_coef$Coefficient[-1])], perplexity = 10 ) 
+tsne_mat <- model_mat %>% 
+  as_tibble() %>%
+  filter(Year2003==0) %>%
+  dplyr::select(one_of(df_coef$Coefficient)) %>%
+  dplyr::select(-matches('Intercept|Year|College_ID') ) %>% 
+  select_if( .predicate = function(x) any(x != x[[1]]) ) %>%
+  as.matrix() %>% 
+  scale()
+tsne_out <- Rtsne( tsne_mat, perplexity = 10, initial_dims = 20 ) 
 #   } 
 # )
-
-college_names <- glmdata %>% filter(Year2003 == 0 ) %$% College_ID %>%
-{ gsub('^[0-9_]+','',. ) } %>%
-{ gsub('California','Cal',. ) } %>%
-{ gsub('Mass.+Inst.+Tech','MIT',. ) } %>%
-{ gsub('Polytechnic','Poly',. ) } %>%
-{ gsub('Institute of Tech[^ ]+','IT',. ) } %>%
-{ gsub('Tech.+Inst.+','Tech',. ) } %>%
-{ gsub('State','St',. ) } %>%
-{ gsub('University','U',. ) } %>%
-{ gsub('College','Coll',. ) }
-
-categories <- glmdata %>% filter(Year2003 == 0 ) %$% BF_SAT_gt1200le1400 %>% 
-  sapply(function(x,q){ length(q) - sum(x>q) + 1 },q=quantile(.,c(0.1,0.25,0.75,0.9))) %>%
-  factor()
-
-tsne_out$Y %>% 
-  as_tibble() %>% 
-  setNames(c("Y1","Y2")) %>% 
-  mutate( College = college_names, category = categories ) %>% 
-  dplyr::select( College, category, everything() ) %>%
-  { 
-    ggplot(.,aes(x=Y1,y=Y2,color=category)) + 
-      geom_point(size=2) + 
-      geom_text(aes(label=College),size=2,check_overlap = TRUE) +
-      theme( text = element_text( face = 'bold' ) )
-  } %>%
-  print()
 
 ```
 ```{r tsne_glmnet}
 set.seed( 2393 )
 tsne_glmnet_cv <- cv.glmnet(
-  model_mat[model_mat[,'Year2003']==0,grep('College_ID',df_coef$Coefficient[-1],value=TRUE,invert = TRUE)], #glmdata %>% select(-outcome) %>% as.matrix(),
+  tsne_mat,
   tsne_out$Y,
   family='mgaussian',
   lambda = exp(seq(log(0.1),log(10),length.out = 50))
 )
 plot( tsne_glmnet_cv )
 
-tsne_glmnet_coef <- tsne_glmnet_cv %$%
-  coef(.,s=exp(mean(log(c(lambda.1se,lambda.min)))))
+#tsne_glmnet_coef <- tsne_glmnet_cv %$% coef(.,s=exp(mean(log(c(lambda.1se,lambda.min)))))
+tsne_glmnet_coef <- tsne_glmnet_cv %>% coef()
 tsne_glmnet_coef$y1 %>%
 { (.)[abs((.)[,1])>0,1] } %>%
 { data_frame(Coefficient = names(.), `$/util` = round(.,2)) } %>%
@@ -708,7 +690,7 @@ tsne_glmnet_coef$y2 %>%
 { data_frame(Coefficient = names(.), `$/util` = round(.,2)) } %>%
   print()
 
-tsne_glmnet_coef <- 
+tsne_coef_df <- 
   tsne_glmnet_coef$y1 %>% 
   as.matrix() %>% 
   as.data.frame() %>% 
@@ -721,10 +703,103 @@ tsne_glmnet_coef <-
       as.data.frame() %>% 
       as_tibble() %>% 
       rownames_to_column() %>% 
-      setNames(c("Coefficient","Y2")),
+      setNames(c("Coefficient","Y2")) %>%
+      mutate(Y2 = -Y2 ),
     by = "Coefficient"
   ) %>% 
-  filter(Y1 !=0 | Y2 !=0)
+  filter( abs(Y1) > 1.0E-9 | abs(Y2) > 1.0E-9 )
+
+tsne_coef_df %>%
+{
+  ggplot(., aes(x=Y1,y=Y2,label=Coefficient)) +
+    geom_point() +
+    geom_text( check_overlap = TRUE )
+} %>%
+  print()
+
+key_terms <- tsne_coef_df %>% 
+  mutate(mag= sqrt(Y1^2+Y2^2)) %>% 
+  filter(abs(mag)>quantile(abs(mag),0.9)) %>% 
+  arrange(desc(mag)) %$% Coefficient
+
+college_names <- glmdata %>% 
+  filter(Year2003 == 0 ) %$% 
+  College_ID %>%
+  { gsub('^[0-9_]+','',. ) } %>%
+  { gsub('Northwestern University','NU',.) } %>%
+  { gsub('California','Cal',. ) } %>%
+  { gsub('Mass.+Inst.+Tech','MIT',. ) } %>%
+  { gsub('(Mass|Penn|Wash)[^ ]+ *','\\1',.) } %>%
+  { gsub('Polytechnic','Poly',. ) } %>%
+  { gsub('Institute of Tech[^ ]+','IT',. ) } %>%
+  { gsub('Tech.+Inst.+','Tech',. ) } %>%
+  { gsub('State','St',. ) } %>%
+  { gsub('University','U',. ) } %>%
+  { gsub('(U of )|( U$)','',. ) } %>%
+  { gsub('College','Col',. ) } %>%
+  { gsub('New York','NY',.)} %>%
+  { gsub('International','Intl',.) } %>%
+  { gsub('North[^ ]+','N',.)} %>%
+  { gsub('South[^ ]+','S',.)} %>%
+  { gsub('West[^ ]+','W',.)} %>%
+  { gsub('East[^ ]+','E',.)}
+
+categories <- { 
+  tsne_mat[,key_terms] %*% 
+    (tsne_coef_df %>% filter(Coefficient %in% key_terms) %$% Y2) 
+  } %>%
+  sapply(function(x,q){ length(q) - sum(x>q) + 1 },q=quantile(.,c(0.1,0.25,0.75,0.9))) %>%
+  factor()
+
+tsne_df <- tsne_out$Y %>% 
+  as_tibble() %>% 
+  setNames(c("Y1","Y2")) %>% 
+  mutate( College = college_names, category = categories, Y2 = -Y2 ) %>% 
+  dplyr::select( College, category, everything() ) %>% 
+  mutate_at(funs(1.5*scale(.)),.vars=vars(Y1,Y2))
+
+tsne_df %>%
+  { 
+    ggplot(.,aes(x=Y1,y=Y2,color=category)) + 
+      geom_point() + 
+      geom_text(aes(label=College),size=3,check_overlap = TRUE) +
+      theme( text = element_text( face = 'bold' ) )
+  } %>%
+  print()
+
+
+tsne_coef_df %>% 
+  mutate( mag = sqrt(Y1^2 + Y2^2) ) %>%
+  {
+    ggplot(., aes( x = Y1, y = Y2 ) ) +
+      geom_point( color = 'red' ) +
+      geom_text( 
+        aes( label = Coefficient), 
+        color = 'red', 
+        size = 3, 
+        check_overlap = TRUE 
+      ) + 
+      geom_segment(
+        inherit.aes = FALSE,
+        data = (.) %>% filter(mag>1),
+        aes( x=0, y=0, xend=Y1, yend=Y2 ),
+        color = 'red',
+        arrow = arrow(length = unit(0.03, "npc"))
+      ) + 
+      geom_text(
+        inherit.aes = FALSE,
+        data = tsne_df,
+        aes( x=Y1, y=Y2, label=College ),
+        mapping=,
+        color = 'black',
+        size=3,
+        check_overlap = TRUE
+      )  +
+      geom_point( data=tsne_df, aes(x=Y1,y=Y2), alpha=0.3) +
+      ggtitle( "t-SNE Biplot" , subtitle = "(black = item, red = dimension)") +
+      theme( text = element_text( face = 'bold' ) )
+  } %>%
+  print()
 
 ```
 
