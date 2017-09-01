@@ -17,6 +17,7 @@ library( RSQLite )
 library( ggplot2 )
 library( formattable )
 library( glmnet )
+library( Rtsne )
 
 ```
 
@@ -603,6 +604,10 @@ hicor     <- nms %>%
     } 
   )
 hicor     <- hicor[sapply(hicor,length)>0]
+```
+
+
+```{r glmnet_cv,fig.height=8,fig.width=10}
 
 # Since we know that some of the interactions are confounded with each other and with some main effects,
 # which causes the cross-validation error to blow up, we'll find the models that have fewer terms than
@@ -640,6 +645,91 @@ print( Expected_Earnings )
 
 ```
 
+### Visualization of College (t-SNE Plot)
+
+Let's plot the colleges in 2-D space to see if we can find patterns.
+
+```{r tsne,fig.height=8,fig.width=10}
+
+set.seed( 191 )
+# system.time( 
+#   { 
+    tsne_out <- Rtsne( model_mat[model_mat[,'Year2003']==0,!grepl('College',df_coef$Coefficient[-1])], perplexity = 10 ) 
+#   } 
+# )
+
+college_names <- glmdata %>% filter(Year2003 == 0 ) %$% College_ID %>%
+{ gsub('^[0-9_]+','',. ) } %>%
+{ gsub('California','Cal',. ) } %>%
+{ gsub('Mass.+Inst.+Tech','MIT',. ) } %>%
+{ gsub('Polytechnic','Poly',. ) } %>%
+{ gsub('Institute of Tech[^ ]+','IT',. ) } %>%
+{ gsub('Tech.+Inst.+','Tech',. ) } %>%
+{ gsub('State','St',. ) } %>%
+{ gsub('University','U',. ) } %>%
+{ gsub('College','Coll',. ) }
+
+categories <- glmdata %>% filter(Year2003 == 0 ) %$% BF_SAT_gt1200le1400 %>% 
+  sapply(function(x,q){ length(q) - sum(x>q) + 1 },q=quantile(.,c(0.1,0.25,0.75,0.9))) %>%
+  factor()
+
+tsne_out$Y %>% 
+  as_tibble() %>% 
+  setNames(c("Y1","Y2")) %>% 
+  mutate( College = college_names, category = categories ) %>% 
+  dplyr::select( College, category, everything() ) %>%
+  { 
+    ggplot(.,aes(x=Y1,y=Y2,color=category)) + 
+      geom_point(size=2) + 
+      geom_text(aes(label=College),size=2,check_overlap = TRUE) +
+      theme( text = element_text( face = 'bold' ) )
+  } %>%
+  print()
+
+```
+```{r tsne_glmnet}
+set.seed( 2393 )
+tsne_glmnet_cv <- cv.glmnet(
+  model_mat[model_mat[,'Year2003']==0,grep('College_ID',df_coef$Coefficient[-1],value=TRUE,invert = TRUE)], #glmdata %>% select(-outcome) %>% as.matrix(),
+  tsne_out$Y,
+  family='mgaussian',
+  lambda = exp(seq(log(0.1),log(10),length.out = 50))
+)
+plot( tsne_glmnet_cv )
+
+tsne_glmnet_coef <- tsne_glmnet_cv %$%
+  coef(.,s=exp(mean(log(c(lambda.1se,lambda.min)))))
+tsne_glmnet_coef$y1 %>%
+{ (.)[abs((.)[,1])>0,1] } %>%
+{ data_frame(Coefficient = names(.), `$/util` = round(.,2)) } %>%
+  print()
+tsne_glmnet_coef$y2 %>%
+{ (.)[abs((.)[,1])>0,1] } %>%
+{ data_frame(Coefficient = names(.), `$/util` = round(.,2)) } %>%
+  print()
+
+tsne_glmnet_coef <- 
+  tsne_glmnet_coef$y1 %>% 
+  as.matrix() %>% 
+  as.data.frame() %>% 
+  as_tibble() %>% 
+  rownames_to_column() %>% 
+  setNames(c("Coefficient","Y1")) %>% 
+  full_join(
+    tsne_glmnet_coef$y2 %>% 
+      as.matrix() %>% 
+      as.data.frame() %>% 
+      as_tibble() %>% 
+      rownames_to_column() %>% 
+      setNames(c("Coefficient","Y2")),
+    by = "Coefficient"
+  ) %>% 
+  filter(Y1 !=0 | Y2 !=0)
+
+```
+
+### Visualize Predictions
+
 We now collect the predictions and the earnings premia as determined by the model coefficient for the corresponding
 college.  Any college that does not have a coefficient in the model receives an earnings premium of zero.
 
@@ -650,6 +740,15 @@ glmnet_pred <- glmnet_cv %$%
   predict(.,newx = model_mat[,setdiff(colnames(model_mat),names(hicor))], #glmdata %>% select(-outcome) %>% as.matrix(), 
   s = exp(mean(log(c(lambda.1se,lambda.min))))
 )
+
+# abbreviate_college <- function( df, college_col ){
+#   college_col <- enquo( college_col )
+#   cname       <- quo_name( college_col )
+#   nms <- df %>%
+#     dplyr::select(!!college_col) %>%
+#     { gsub("Mass.+Inst.+Tech.+","MIT", (.)[[1]] ) }
+#   df %>% mutate( !!cname := nms )
+# }
 
 # Collect the predictions in a data table...
 predictions <- data_frame(predicted_earnings = glmnet_pred[,1]) %>% 
@@ -666,7 +765,7 @@ predictions %>%
     ggplot(., aes(x=predicted_earnings,y=outcome)) +
       geom_point() +
       geom_abline(intercept = 0, slope = 1, color = 'red', linetype = 2, size = 1) +
-      geom_text(aes(label = College ), size=2, check_overlap = TRUE ) +
+      geom_text(aes(label = College ), size=3, check_overlap = TRUE ) +
       ggtitle('Median earnings of students working and not enrolled 6 years after entry') +
       labs(
         x = 'Predicted ($/yr)',
@@ -681,6 +780,7 @@ epremium <- df_coef %>%
     unitID = gsub('.+ID([0-9]+)__.+','\\1',Coefficient) %>% as.integer(),
     College = gsub('^College_ID.+__','',Coefficient)
   ) %>% 
+  #abbreviate_college() %>%
   rename(earnings_premium = `$/util`) %>% 
   right_join(student %>% filter(Year==2013) %>% select(unitID,College,SAT_AVG)) %>%
   left_join( student %>% filter(Year==2005) %>% select(unitID,Treasury_md_earn_wne_p6)) %>%
