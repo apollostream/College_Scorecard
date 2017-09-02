@@ -2,11 +2,14 @@
 title: 'College Scorecard: Earnings Premium & Value Proposition'
 author: "Michael L. Thompson"
 date: "January 2, 2017"
-output: 
+output:
+  pdf_document:
+    toc: yes
   html_notebook:
-     toc: true
+    toc: yes
   html_document:
-     toc: true
+    toc: yes
+always_allow_html: yes
 ---
 
 ```{r setup, include=FALSE, message=FALSE, warning=FALSE}
@@ -47,7 +50,7 @@ The annual costs are computed across a range of financial need levels: without f
 
 Load the [kaggle.com version of the U.S. Dept. of Education College Scorecard Dataset](kaggle.com) and generate features for modeling using similar code as used in the previously submitted ["Best Colleges for You" script](https://www.kaggle.com/apollostar/d/kaggle/college-scorecard/which-college-is-best-for-you). It uses package `RSQLite` to load the database, and we pare down the database to approximately 900 4-year Bachelor's degree granting colleges.
 
-```{r dataprep, echo = FALSE }
+```{r dataprep, echo = FALSE,warning=FALSE,message=FALSE }
 makeQuery <- function( year, fieldNames, dfNames ){
   # The fields not included in `fieldNames`, other than "Year", should have the same value regardless of year.
   paste(
@@ -283,28 +286,37 @@ student %<>%
 
 ### Feature Engineering: Bayes Factors
 
-Approximate Bayes factors serve as the features of the model. The Bayes factor is the ratio of the posterior-odds of the hypothesis (i.e., after receiving the evidence) to the prior-odds of the hypothesis (i.e., before seeing the evidence).  The evidence is the attribue of a student -- like "SAT score greater than 1400"" -- and the hypothesis is attendance at the college. (There may not be a compelling reason to do this, but informal testing in other applications indicates a greater ability to distinguish amongst the colleges in the Bayes factors feature space than in the raw variable space.)
+Approximate Bayes factors serve as the features of the model. The Bayes factor is the ratio of the posterior-odds of the hypothesis (i.e., after receiving the evidence) to the prior-odds of the hypothesis (i.e., before seeing the evidence).  The evidence is the attribue of a student -- like "*SAT score greater than 1400*" -- and the hypothesis is attendance at the college. (*There may not be a compelling reason to do this, but informal testing in other applications indicates a greater ability to distinguish amongst the colleges in the Bayes factors feature space than in the raw variable space.*)
 
-Compute the following for the feature corresponding to attribute `Attribute_Y` for each college of interest `College_X` (we use log-base 10 on the Bayes factor.):
+We compute the Bayes factor, $\operatorname{BF}_{\log10}$, i.e. applying $\log_{10}$ to the 
+posterior to prior odds ratio, using the following 
+for the feature corresponding to attribute $\text{Attribute }Y$ for each college of interest
+$\text{College }X$, where $E$ represents the *evidence* -- in this case, observing a college student with 
+$\text{Attribute }Y$ -- and $H$ represents the *hypothesis* -- in this case, the proposition that 
+the student is enrolled at $\text{College }X$ (we use log-base-10 on the Bayes factor.):
 
-`BF_log10( hypothesis = College_X | evidence = Attribute_Y )` 
-`= log10( Odds( hypothesis = College_X | evidence = Attribute_Y )/Odds( hypothesis = College_X ) )`
-`= log10( P( evidence = Attribute_Y | hypothesis = College_X )/P( evidence = Attribute_Y | hypothesis = NOT(College_X) ))`
-`~ log10( P( evidence = Attribute_Y | hypothesis = College_X )/P( evidence = Attribute_Y )`
+\[
+\begin{aligned}
+&\operatorname{BF}_{\log10}( H = \text{College }X | E = \text{Attribute }Y ) \\
+&= \log_{10}\frac{ \operatorname{Odds}( H = \text{College }X | E = \text{Attribute }Y )}{\operatorname{Odds}( H = \text{College_X} ) )}\\
+&= \log_{10} \frac{\operatorname{P}( E = \text{Attribute }Y | H = \text{College }X )}{\operatorname{P}( E = \text{Attribute }Y | H = \lnot (\text{College }X) )}\\
+&\sim \log_{10} \frac{ \operatorname{P}( E = \text{Attribute }Y | H = \text{College }X )}{\operatorname{P}( E = \text{Attribute }Y )}\\
+\end{aligned}
+\]
 
-The final approximation is a good one because there are 900 colleges in our working set; so the students attending `College_X` are a very small proportion of the entire American student population. Therefore, the probability of finding a student with `Attribute_Y` amongst students *not* at `College_X` is basically the same as finding such a student amongst the entire student population (`College_X` included).
+The final approximation is a good one because there are 900 colleges in our working set; so the students attending $\text{College }X$ are a very small proportion of the entire American student population. Therefore, the probability of finding a student with $\text{Attribute }Y$ amongst students *not* at $\text{College }X$ is basically the same as finding such a student amongst the entire student population ($\text{College }X$ included).
 
-Above, the flip in the propositions on each side of the conditional ("|") when we go from `Odds(H|E)` to probabilities, `P(E|H)`, occurs by applying Bayes' Rule.
+Above, the flip in the propositions on each side of the conditional ("|") when we go from $\operatorname{Odds}(H|E)$ to probabilities, $\operatorname{P}(E|H)$, occurs by applying Bayes' Rule.
 
 #### Estimating the Probabilities
 
-For some of the probabilities used in approximating the Bayes factors, the probabilities `P( evidence = Attribute_Y | hypothesis = College_X )` are simply the reported proportions in the database. 
+For some of the probabilities used in approximating the Bayes factors, the probabilities $\operatorname{P}( E = \text{Attribute }Y | H = \text{College }X )$ are simply the reported proportions in the database. 
 
 But, the main challenge in using Bayes factors as features is computing the final probabilities for attributes for which only moments and quantiles are reported in the database. For such attributes, we first approximate a full probability distribution of students at the college of interest and then apply the proposition. 
 
-Take SAT for example. We are given the mean, median and quartiles for SAT scores of students at each college.  For each college, we fit a model to these values to approximate the continuous distribution of SAT scores of students at the college.  Then, for an attribute such as `Attribute_Y` = "SAT score greater than 1400", we compute `P( evidence = Attribute_Y | hypothesis = College_X )` by simply computing the upper tail probability of SAT with lower limit 1400.  Finally, to compute `P( evidence = Attribute_Y )`, we simply take the weighted average, across all colleges, of the previously calculated conditional probability, where the weighting is simply the proportion of students attending `College_X` amongst all students in our 1100+ college universe. In the database, field `UGDS` is the number of undergraduate students attending the college. So the proportion of all students attending `College_X` is `P( hypothesis = College_X ) = UGDS[College_X]/sum( UGDS[College_X] )`.
+Take SAT for example. We are given the mean, median and quartiles for SAT scores of students at each college.  For each college, we fit a model to these values to approximate the continuous distribution of SAT scores of students at the college.  Then, for an attribute such as $\text{Attribute }Y$ = "*SAT score greater than 1400*", we compute $\operatorname{P}( E = \text{Attribute }Y | H = \text{College }X )$ by simply computing the upper tail probability of SAT with lower limit 1400.  Finally, to compute $\operatorname{P}( E = \text{Attribute }Y )$, we simply take the weighted average, across all colleges, of the previously calculated conditional probability, where the weighting is simply the proportion of students attending $\text{College }X$ amongst all students in our 900-college universe. In the database, field `UGDS` is the number of undergraduate students attending the college. So the proportion of all students attending $\text{College }X$ is $\operatorname{P}( H = \text{College }X ) =$ `UGDS[College_X]/sum( UGDS[College_X] )`.
 
-For attributes like region and locale, to estimate `P( evidence = Attribute_Y | hypothesis = College_X )`, we define `Attribute_Y` to reflect preference.  So, for, say `Region == 'Great Lakes'`, `Attribute_Y` is "prefers attending college in Great Lakes region".  And, we use our own subjective knowledge to just assume that of the students attending a college in a specific region (or locale), a non-zero proportion of them preferring attending colleges an alternative region (or locale) and that the alternative regions (locales) that are more similar to the one in which the college exists would have a higher proportion of such students than alternatives that are less similar. For regions, similarity is determined by distance -- e.g., Mid-East is more similar to Great Lakes than is Far West. For locales, similarity is determined by character -- i.e., campuses in suburbs of large cities are more similar to those in large cities than are remote rural campuses.
+For attributes like region and locale, to estimate $P( E = \text{Attribute }Y | H = \text{College }X )$, we define $\text{Attribute }Y$ to reflect preference.  So, for, say `Region == 'Great Lakes'`, $\text{Attribute }Y$ is "prefers attending college in Great Lakes region".  And, we use our own subjective knowledge to just assume that of the students attending a college in a specific region (or locale), a non-zero proportion of them preferring attending colleges an alternative region (or locale) and that the alternative regions (locales) that are more similar to the one in which the college exists would have a higher proportion of such students than alternatives that are less similar. For regions, similarity is determined by distance -- e.g., Mid-East is more similar to Great Lakes than is Far West. For locales, similarity is determined by character -- i.e., campuses in suburbs of large cities are more similar to those in large cities than are remote rural campuses.
 
 ```{r features, echo=FALSE}
 
@@ -651,7 +663,7 @@ print( Expected_Earnings )
 
 Let's plot the colleges in 2-D space to see if we can find patterns.
 
-```{r tsne,fig.height=8,fig.width=10}
+```{r tsne}
 
 set.seed( 191 )
 # system.time( 
@@ -669,7 +681,7 @@ tsne_out <- Rtsne( tsne_mat, perplexity = 10, initial_dims = 20 )
 # )
 
 ```
-```{r tsne_glmnet}
+```{r tsne_glmnet,fig.height=8,fig.width=10}
 set.seed( 2393 )
 tsne_glmnet_cv <- cv.glmnet(
   tsne_mat,
