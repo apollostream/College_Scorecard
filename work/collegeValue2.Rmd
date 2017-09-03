@@ -3,13 +3,13 @@ title: 'College Scorecard: Earnings Premium & Value Proposition'
 author: "Michael L. Thompson"
 date: "September 2, 2017"
 output:
-  pdf_document:
-    toc: yes
-    toc_depth: 4
   html_notebook:
     toc: yes
     toc_depth: 4
   html_document:
+    toc: yes
+    toc_depth: 4
+  pdf_document:
     toc: yes
     toc_depth: 4
 always_allow_html: yes
@@ -24,6 +24,7 @@ library( ggplot2 )
 library( formattable )
 library( glmnet )
 library( Rtsne )
+library( deldir )
 
 ```
 
@@ -32,21 +33,71 @@ library( Rtsne )
 
 The U.S. Department of Education College Scorecard database is a rich source of information intended to help students and parents understand the true costs of attending college in America.  This script leverages the database to compute an *earnings premium* and a *value proposition* for each college.
 
-**IMPORTANT: This is a stab serving as an exploratory data analysis.**
-**It's not a commentary on the actual value represented by a college. Future earnings aren't the sum total of**
-**the value of a college education.**
+**IMPORTANT: This is an exploratory data analysis.**
+It is not a commentary on the actual value represented by a college.
+Future earnings aren't the sum total of the value of a college education.
+
+### College Exploration Application
+
+**See the [Best Colleges for You](https://thompsonml.shinyapps.io/BestCollegeApp/) web-based app to explore this same College Scorecard database.**
 
 ### Earnings Premium
-The earnings premium for a college is the earnings in excess of the average annual earnings at 6 years after matriculation after controlling for (1) the academic abilities of the students at the college, (2) the academic discipline distribution of Bachelor's degrees of the students graduating from the college, and (3) the geographic location and campus locale of the university.
+We begin with this premise:
 
-Academic ability is measured by SAT. Academic discipline, by percentages of students receiving each type of degree.  And, geographic location, by the region (New England, Mid-East, Southeast, Southwest, Plains, Great Lakes, Rocky Mountains, and Far West) and the locale (City, Suburb, Town, and Rural).
++   *The earnings permium for a college is the earnings in excess of the average (across all colleges) of the median annual earnings, measured at $6$ years after matriculation, plus key factors other than college reputation that might predict earnings.*
+
+The earnings premium for college $i$, $\pi_i$, is given by the following formula:
+
+\[
+\pi_i \equiv e_i - (\bar{e} + f(A_i,\mathbf{D}_i,L_i)),
+\]
+
+where $e_i$ is the reported median annual earnings for students from college $i$ at 
+$6$ years after matriculation;  $\bar{e} \equiv \frac{1}{N}\times\sum_{i=1}^N{e_i}$;
+and $\sum_{i=1}^N{\pi_i}\equiv 0$.
+
+The function $f(A_i,\mathbf{D}_i,L_i)$ serves to control for the following factors:   
+
+(1)   Academic abilities of the students at the college, $A_i$. 
+(2)   Academic discipline distribution of Bachelor's degrees $d_{ij}$ of the students graduating from the college, $\mathbf{D}_i=\{d_{ij}\}$. 
+(3)   Geographic location and campus locale of the university, $L_i$.
+(4)   Any significant interactions amongst $A_i$, $\mathbf{D}_i$, and $L_i$.
+
+Academic ability $A_i$ is measured by SAT. 
+Academic discipline $\mathbf{D}_i$, by percentages of students receiving each type of degree $d_{ij}$.  
+And, geographic location $L_i$, by the region (New England, Mid-East, Southeast, Southwest, Plains, Great Lakes, Rocky Mountains, and Far West) and the locale (City, Suburb, Town, and Rural) in which college $i$ is located.
+
+**Therefore, we intend that the earnings premium $\pi_i$ captures the impact of the reputation of college $i$ on the future earnings of its students.**
 
 ### Value Proposition
-The value proposition of a college is defined as the ratio of the adjusted annual earnings divided by the expected annual costs of attendendance.  
+The value proposition of a college $i$, $V_i$, is defined as follows:
 
-The adjusted annual earnings is computed by (1) adding the earnings premium  to the overall mean (across all colleges) of annual earnings 6 years after matriculation, and (2) multiplying this sum by the completion rate for the college to adjust for the probability of actually achieving a degree from the college.  
++   *The ratio of the adjusted annual earnings $\tilde{e}_i$ to the expected annual costs of attendance $c_i$.*  
 
-The annual costs are computed across a range of financial need levels: without financial aid and with financial aid corresponding to the household income level (i.e., the net price for the household income level). 
+Thus, $V_i$ is represented by the following formula:
+\[
+V_i\equiv \frac{\tilde{e}_i - c_i}{c_i} = \frac{\tilde{e}_i}{c_i}-1
+\]
+
+
+The adjusted annual earnings for college $i$, $\tilde{e}_i$, is computed as follows:
+
+\[\tilde{e}_i = e_i^* \times p_i = (\pi_i + \bar{e})\times p_i = (e_i - f(A_i,\mathbf{D}_i,L_i))\times p_i
+\]. 
+
+The component terms are defined as follows:
+
+(1)   The expected annual earnings for college $i$, $e_i^*$ is gotten by adding the earnings premium $\pi_i$ to the overall mean (across all colleges) of annual earnings 6 years after matriculation $\bar{e}$, thus controlling the reported earnings $e_i$ for $A_i$, $\mathbf{D}_i$, and $L_i$.
+(2)  The *adjustment* is performed by multiplying $e_i^*$ by the completion rate $p_i$, i.e., we adjust for the probability of actually achieving a degree from the college.  
+
+The annual costs $c_i$ are provided by the *net price* (i.e., tuition, fees and living expenses less financial aid) across a range of financial need levels: 
+
++   without financial aid and 
++   with financial aid corresponding to the household income level (i.e., the net price for the household income level). 
+
+**Therefore, we intend that the value proposition $V_i$ captures the return on your costs for attending the college.** 
+
+Values greater than $0$ indicate the college is a good value (at that level of financial aid); and values less than $0$ indicate a poor value.
 
 
 ## Data Preparation
@@ -289,14 +340,18 @@ student %<>%
 
 ### Feature Engineering: Bayes Factors
 
-Approximate Bayes factors serve as the features of the model. The Bayes factor is the ratio of the posterior-odds of the hypothesis (i.e., after receiving the evidence) to the prior-odds of the hypothesis (i.e., before seeing the evidence).  The evidence is the attribue of a student -- like "*SAT score greater than 1400*" -- and the hypothesis is attendance at the college. (*There may not be a compelling reason to do this, but informal testing in other applications indicates a greater ability to distinguish amongst the colleges in the Bayes factors feature space than in the raw variable space.*)
+Approximate Bayes factors serve as the features of the model. 
 
-We compute the Bayes factor, $\operatorname{BF}_{\log10}$, i.e. applying $\log_{10}$ to the 
-posterior to prior odds ratio, using the following 
-for the feature corresponding to attribute $\text{Attribute }Y$ for each college of interest
-$\text{College }X$, where $E$ represents the *evidence* -- in this case, observing a college student with 
-$\text{Attribute }Y$ -- and $H$ represents the *hypothesis* -- in this case, the proposition that 
-the student is enrolled at $\text{College }X$ (we use log-base-10 on the Bayes factor.):
+The Bayes factor $\operatorname{BF}$ is the ratio of the posterior-odds of the hypothesis (i.e., after receiving the evidence) to the prior-odds of the hypothesis (i.e., before seeing the evidence).  
+
+The evidence is the attribute of a student -- like "*SAT score greater than 1400*" -- and the hypothesis is attendance at the college. 
+
+(*There may not be a compelling reason to do this, but informal testing in other applications indicates a greater ability to distinguish amongst the colleges in the Bayes factors feature space than in the raw variable space.*)
+
+We compute the Bayes factor, $\operatorname{BF}_{\log10}$ by applying $\log_{10}$ to the 
+posterior-to-prior odds ratio.  The equations below show the calculation for  $\operatorname{BF}_{\log10}$
+defining the feature corresponding to attribute $\text{Attribute }Y$ for each college of interest
+$\text{College }X$.
 
 \[
 \begin{aligned}
@@ -307,9 +362,13 @@ the student is enrolled at $\text{College }X$ (we use log-base-10 on the Bayes f
 \end{aligned}
 \]
 
-The final approximation is a good one because there are 900 colleges in our working set; so the students attending $\text{College }X$ are a very small proportion of the entire American student population. Therefore, the probability of finding a student with $\text{Attribute }Y$ amongst students *not* at $\text{College }X$ is basically the same as finding such a student amongst the entire student population ($\text{College }X$ included).
+$E$ represents the *evidence* -- in this case, observing a college student with 
+$\text{Attribute }Y$. $H$ represents the *hypothesis* -- in this case, the proposition that 
+the student is enrolled at $\text{College }X$.
 
 Above, the flip in the propositions on each side of the conditional ("|") when we go from $\operatorname{Odds}(H|E)$ to probabilities, $\operatorname{P}(E|H)$, occurs by applying Bayes' Rule.
+
+The final approximation is a good one because there are 900 colleges in our working set; so the students attending $\text{College }X$ are a very small proportion of the entire American student population. Therefore, the probability of finding a student with $\text{Attribute }Y$ amongst students *not* at $\text{College }X$ is basically the same as finding such a student amongst the entire student population ($\text{College }X$ included).
 
 #### Estimating the Probabilities
 
@@ -624,6 +683,9 @@ hicor     <- hicor[sapply(hicor,length)>0]
 ```
 
 
+Now, we have the model's design matrix, `model_mat`. We use `cv.glmnet` to perform variable
+selection to arrive at the final model for each college's earnings `outcome`.
+
 ```{r glmnet_cv,fig.height=8,fig.width=10}
 
 # Since we know that some of the interactions are confounded with each other and
@@ -668,7 +730,8 @@ print( Expected_Earnings )
 
 ### Visualization of College (t-SNE Biplot)
 
-Let's plot the colleges in 2-D space to see if we can find patterns.
+Let's plot the colleges in 2-D space to see if we can find patterns. We use [*t-Distributed Stochastic Neighborhood Embeddings*](http://lvdmaaten.github.io/tsne/) (t-SNE) on the relevant predictors of the outcome variable to find a good 2-D representation in which we hope
+to be able to identify clusters of similar colleges having similar earnings outcomes.
 
 ```{r tsne}
 
@@ -688,7 +751,7 @@ tsne_out <- Rtsne( tsne_mat, perplexity = 10, initial_dims = 20 )
 # )
 
 ```
-```{r tsne_glmnet,fig.height=8,fig.width=10}
+```{r tsne_glmnet,fig.height=10,fig.width=11}
 set.seed( 2393 )
 tsne_glmnet_cv <- cv.glmnet(
   x      = tsne_mat,
@@ -807,10 +870,21 @@ tsne_df %>%
   print()
 ```
 
-```{r biplot, warning=FALSE,message=FALSE,fig.height=9,fig.width=10}
+A t-SNE biplot can be created by overlaying the colleges in the 2-D t-SNE space on top of the
+dimensions defined by the terms in a linear model between the outcome model's predictors and the t-SNE coordinates.
 
+In this way, we can readily interpret which features (Bayes factors) define the similarity amongst clustered
+colleges.
+
+```{r biplot, warning=FALSE,message=FALSE,fig.height=10,fig.width=11}
+
+y2_min <- -3.5
 tsne_coef_df %>% 
-  mutate( mag = sqrt(Y1^2 + Y2^2) ) %>%
+  mutate( 
+    mag = sqrt(Y1^2 + Y2^2),
+    Y2 = pmax(y2_min,Y2)
+    Coefficient = gsub('\\([^)]+\\)','',gsub('BF_','',Coefficient))
+  ) %>%
   {
     ggplot(., aes( x = Y1, y = Y2 ) ) +
       geom_point( color = 'red', alpha = 0.1 ) +
@@ -839,8 +913,246 @@ tsne_coef_df %>%
         check_overlap = TRUE
       )  +
       geom_point( data=tsne_df, aes(x=Y1,y=Y2, size = Earnings ), color='blue',alpha=0.1) +
-      ggtitle( "t-SNE Biplot" , subtitle = "(blue = item, red = dimension)") +
-      theme( text = element_text( face = 'bold' ) )
+      ggtitle( "t-SNE Biplot" , subtitle = "(blue = college, red = feature)") +
+      theme( text = element_text( face = 'bold' ) ) +
+      scale_y_continuous(limits = c(y2_min,4))
+  } %>%
+  print()
+
+```
+
+#### Voronoi Tessalation and Bayesian Blocks in 2-D
+
+See ["Bayesian Blocks in Two or More Dimensions: Image Segmentation and Cluster Analysis"](https://arxiv.org/abs/math/0111128) by J.D. Scargle, Nov. 11, 2001,
+*Workshop on Bayesian Inference and Maximum Entropy Methods in Science and Engineering (MAXENT 2001)*,
+held at Johns Hopkins University, Baltimore, MD USA on August 4-9, 2001.
+
+See ["Voronoi Diagram and Delaunay Triangulation in R"](https://flowingdata.com/2016/04/12/voronoi-diagram-and-delaunay-triangulation-in-r/) 
+by Nathan Yau, April 12, 2016.
+
+
+```{r voronoi,eval=FALSE,echo=FALSE}
+# Calculate tessellation and triangulation
+vtess <- deldir( c(tsne_df$Y1), c(tsne_df$Y2) )
+
+# Plot Voronoi tessellation.
+plot(tsne_df %>% select(Y1,Y2), type="n", asp=1)
+points(tsne_df %>% select(Y1,Y2), pch=20, col="red", cex=0.5)
+plot(vtess, wlines="tess", wpoints="none", number=FALSE, add=TRUE, lty=1)
+
+# # Delaunay triangulation
+# plot(tsne_out$Y, type="n", asp=1)
+# plot(vtess, wlines="triang", wpoints="none", number=FALSE, add=TRUE, lty=1)
+# points(tsne_out$Y, pch=20, col="black", cex=0.5)
+
+# Get the Voronoi tessalation summary and augment with density, N, and V for Beta function.
+
+# Get the neighbors of every point -- as long as index of neighbor 
+# is GREATER THAN THAT OF CURRENT POINT.
+neighbors_tess <- function(df,ipt) {
+  df %>% 
+    filter(ind1==ipt | ind2 == ipt ) %$% 
+    {setdiff(union(ind1,ind2),1:ipt)} %>%
+    {list(nbrs=.,ipt=ipt, all_nbrs = sort(union(ind1,ind2)) )}
+}
+
+nt <- vtess$dirsgs %>% 
+  as_tibble() %>% 
+  { 
+    lapply(
+      seq_len( vtess$n.data ),
+      neighbors_tess,
+      df=.
+    ) 
+  }
+
+min_dir_area <- min( vtess$summary$dir.area )
+vor_tess <- vtess$summary %>% 
+  as_tibble() %>% 
+  mutate(
+    density = 1.0/dir.area,
+    N = 1,
+    V = dir.area/min_dir_area,
+    Phi = beta( N+1, V-N+1 ),
+    peers = seq_len(nrow(.))
+  )
+
+
+# Compute Bayesian Blocks by coalescence of tessalations
+iter_max <- choose( n = vtess$n.data, k = 2 )
+max_merge_limit <- 30
+
+done <- FALSE
+iter <- 0
+while( !done ){
+  merge_factor <- sapply(
+    nt,
+    function(nbr_set){
+      if(length(nbr_set$nbrs)>0){
+        p_mrg <- sapply(
+          nbr_set$nbrs,
+          function(inbr){
+            N_cmb <- vor_tess$N[[nbr_set$ipt]] + vor_tess$N[[inbr]]
+            V_cmb <- vor_tess$V[[nbr_set$ipt]] + vor_tess$V[[inbr]] 
+            return(
+              c(
+                p  = beta(N_cmb+1,V_cmb-N_cmb+1)/(vor_tess$Phi[[nbr_set$ipt]]*vor_tess$Phi[[inbr]]),
+                id = inbr
+              )
+            )
+          }
+        )
+        #i_max <- which.max(p_mrg['p',])
+        i_max <- which(p_mrg['p',]>1) %>% {(.)[which.min( p_mrg['p',.] )]}
+        if(length(i_max)==0){
+          c( id1 = nbr_set$ipt, i_max = 0, p_mrg = 0 )
+        } else {
+          c( id1 = nbr_set$ipt, i_max = p_mrg['id',i_max], p_mrg = p_mrg['p',i_max] )
+        }
+      } else {
+        c( id1 = nbr_set$ipt, i_max = 0, p_mrg = 0 )
+      }
+    }
+  )
+  #i_max <- which.max(merge_factor['p_mrg.p',])
+  i_max <- which(merge_factor['p_mrg.p',]>1) %>% {(.)[which.min( merge_factor['p_mrg.p',.] )]}
+  max_merge <- merge_factor['p_mrg.p',i_max]
+  done <- length(max_merge)==0 || max_merge > max_merge_limit 
+  
+  if(!done){
+    #do_merge
+    id1 <- merge_factor['id1',i_max]
+    id2 <- merge_factor['i_max.id',i_max]
+    
+    nt[[id1]]$nbrs %<>%
+      setdiff( id2 ) %>%
+      union( nt[[id2]]$nbrs )
+    nt[[id2]]$nbrs <- integer()
+    
+    nt[[id1]]$all_nbrs %<>%
+      union( nt[[id2]]$all_nbrs )
+    nt[[id2]]$all_nbrs <- nt[[id1]]$all_nbrs
+    
+    for( i in nt[[id2]]$all_nbrs[which(nt[[id2]]$all_nbrs>id1 & nt[[id2]]$all_nbrs<id2)] ){
+      nt[[i]]$nbrs %<>% setdiff(id2) %>% union(id1)
+      nt[[i]]$all_nbrs %<>% union(id1)
+      nt[[id1]]$all_nbrs %<>% union(i)
+    }
+    
+    vor_tess$N[[id1]] %<>% add( vor_tess$N[[id2]] )
+    vor_tess$V[[id1]] %<>% add( vor_tess$V[[id2]] )
+    vor_tess$Phi[[id1]] <- beta(vor_tess$N[[id1]]+1,vor_tess$V[[id1]]-vor_tess$N[[id1]]+1)
+    vor_tess$peers[[id1]] <- list(
+      union( 
+        unlist( vor_tess$peers[[id1]] ),
+        unlist( vor_tess$peers[[id2]] )
+      )
+    )
+    #print(vor_tess[id1,])
+  }
+  iter <- iter + 1
+  print(c(iter=iter,max_merge))
+  done <- done || iter >= iter_max
+}
+
+n_min <- 4
+plot(tsne_df %>% select(Y1,Y2), type="n", asp=1)
+points(tsne_df %>% select(Y1,Y2), pch=20, col="red", cex=0.5)
+plot(vtess, wlines="tess", wpoints="none", number=FALSE, add=TRUE, lty=1)
+prs <- vor_tess %>% filter( N >= n_min ) %$% peers; 
+for(j in seq_along(prs)) {
+  points(
+    tsne_df %>% select(Y1,Y2) %>% slice(unlist(prs[[j]])), 
+    pch = 20, 
+    col = j, 
+    cex = 1
+  )
+}
+
+```
+#### Hierarchical Clustering
+
+```{r hclustering, warning=FALSE,message=FALSE}
+tsne_mat_hc <- tsne_df %>% select(Y1,Y2) %>% as.matrix() %>% set_rownames(tsne_df$College)
+hc <- hclust( d = dist( tsne_mat_hc ), method = 'single' )
+n_cluster <- 30
+cluster_id <- cutree( hc, k = n_cluster )
+
+# plot( tsne_mat_hc, pch=20, cex=0.5 )
+# for(j in seq_along(cl)){ 
+#   points( tsne_mat_hc[ cl[[j]], ], pch=20, col=j, cex=1)
+# }
+
+# randomize so adjacent clusters are more likely to have very different colors.
+set.seed(137)
+cluster_id <- setNames( sample.int(n_cluster)[cluster_id], names(cluster_id) )
+
+tsne_mat_hc %>%
+  as_tibble() %>%
+  mutate( College = names(cluster_id), cluster = factor( cluster_id ) ) %>%
+  {
+    ggplot(.,aes( x = Y1, y = Y2, color = cluster ) ) +
+      geom_point( size = 1, alpha = 0.3 ) +
+      geom_text( aes(label = College ), size = 3, check_overlap = TRUE ) +
+      theme(
+        text = element_text( face = 'bold' ),
+        legend.position = 'none' 
+      )
+  } %>%
+  print()
+
+y2_min <- -3.5
+tsne_coef_df %>% 
+  mutate( 
+    mag = sqrt(Y1^2 + Y2^2) ,
+    Y2 = pmax(y2_min,Y2),
+    Coefficient = gsub('\\([^)]+\\)','',gsub('BF_','',Coefficient))
+  ) %>%
+  {
+    ggplot(., aes( x = Y1, y = Y2 ) ) +
+      geom_point( color = 'red', alpha = 0.1 ) +
+      geom_text( 
+        aes( label = Coefficient ), 
+        color = 'black',
+        size = 3, 
+        check_overlap = TRUE
+      ) + 
+      geom_segment(
+        inherit.aes = FALSE,
+        data = (.) %>% filter(mag>1),
+        aes( x=0, y=0, xend=Y1, yend=Y2 ),
+        color = 'red',
+        alpha = 0.3,
+        arrow = arrow(length = unit(0.03, "npc"))
+      ) + 
+      geom_text(
+        inherit.aes = FALSE,
+        data = tsne_mat_hc %>%
+          as_tibble() %>%
+          mutate( 
+            College = names(cluster_id), 
+            cluster = factor( cluster_id )
+          ),
+        aes( x=Y1, y=Y2, label=College, color = cluster ),
+        mapping=,
+        show.legend = FALSE,
+        size=3,
+        check_overlap = TRUE
+      )  +
+      geom_point( 
+        data = tsne_mat_hc %>%
+          as_tibble() %>%
+          mutate( 
+            College = names(cluster_id), 
+            cluster = factor( cluster_id )
+          ), 
+        aes(x=Y1,y=Y2, color = cluster ), 
+        show.legend = FALSE,
+        alpha=0.3
+      ) +
+      ggtitle( "t-SNE Biplot" ) +
+      theme( text = element_text( face = 'bold' ) ) +
+      scale_y_continuous(limits = c(y2_min,4))
   } %>%
   print()
 
@@ -974,7 +1286,14 @@ determination of the actual value represented by a college degree from any of th
 
 ```{r value_funcs }
 
-makeStudentValue <- function(studentBF,epremium,residence_state, income_bracket='gt48Kle75K',sat_lvl='gt1000le1200',unthresh=0 ){
+makeStudentValue <- function( 
+  studentBF, 
+  epremium, 
+  residence_state, 
+  income_bracket = 'gt48Kle75K',
+  sat_lvl = 'gt1000le1200',
+  unthresh = 0 
+){
   student_value <- studentBF %>% select(-College,-outcome,-matches('Treasury|pell|Year2003')) %>%
     filter( Year == 2013 ) %>% 
     left_join( student %>% select(Year,unitID, starts_with('NPT')), by = c('Year','unitID' ))  %>%
@@ -1013,10 +1332,10 @@ makeStudentValue <- function(studentBF,epremium,residence_state, income_bracket=
       ),
       Earnings_Adjusted = (Expected_Earnings + earnings_premium)*C150_4_POOLED_SUPP, # Assumes all remaining unexplained earnings are due to a premium.
       inccost = ifelse( INSTATE, ntp, ntp + TUITIONFEE_OUT - TUITIONFEE_IN),
-      unorm = Utility/max(Utility), #10^(Utility-max(Utility)),
-      cnorm  = maxcost/Living_Expenses,
-      c2norm = inccost/Living_Expenses,
-      vnorm = (Earnings_Adjusted/Living_Expenses) / (Earnings_Adjusted[[1]]/Living_Expenses[[1]]), # Earnings normalized by that of the highest utility school.
+      unorm   = Utility/max(Utility), #10^(Utility-max(Utility)),
+      cnorm   = maxcost/Living_Expenses,
+      c2norm  = inccost/Living_Expenses,
+      vnorm   = (Earnings_Adjusted/Living_Expenses - 1.0) / (Earnings_Adjusted[[1]]/Living_Expenses[[1]] - 1.0), # Earnings normalized by that of the highest utility school.
       value_prop1 = vnorm/cnorm, #unorm*vnorm/cnorm,
       value_prop2 = vnorm/c2norm, #unorm*vnorm/c2norm,
       College = sprintf("%d. %s", order(Utility,decreasing=TRUE), gsub('University','U',College) )
@@ -1049,7 +1368,7 @@ plotValue <- function( stdt_val, residence_state, sat_lvl, income_bracket, scale
         ggtitle( 
           label    = sprintf('Value Proposition With & Without Financial Aid (for %s resident, SAT = %s, Income = %s)',residence_state, sat_lvl, income_bracket ), 
           subtitle = paste(
-            'Value Proposition = Adjusted Earnings/Costs',
+            'Value Proposition = Adjusted Earnings/Costs - 1.0',
             sprintf('Earnings > $%2.1fK, Cost < $%2.1fK', earnings_thresh/1000, cost_thresh/1000),
             sep = "; "
           )
@@ -1213,7 +1532,7 @@ student_value_all <-
               inccost = ifelse( INSTATE, ntp, ntp + TUITIONFEE_OUT - TUITIONFEE_IN),
               unorm = Utility/max(Utility), #10^(Utility-max(Utility)),
               cnorm  = inccost/Living_Expenses,
-              vnorm = (Earnings_Adjusted/Living_Expenses) / (Earnings_Adjusted[[1]]/Living_Expenses[[1]]), # Earnings normalized by that of the highest utility school.
+              vnorm = (Earnings_Adjusted/Living_Expenses - 1.0) / (Earnings_Adjusted[[1]]/Living_Expenses[[1]] - 1.0), # Earnings normalized by that of the highest utility school.
               value_prop = vnorm/cnorm, #unorm*vnorm/cnorm,
               coll_rank = order( Utility, decreasing = TRUE ),
               College = sprintf("%d. %s", coll_rank, gsub('University','U',College) )
@@ -1236,7 +1555,7 @@ student_value_all <-
   #   maxv = quantile(value_prop[unorm>unthresh],0.99), 
   #   value_prop = value_prop/maxv  #ifelse(scale_independently,max(value_prop1),max(value_prop2)),
   # ) %>%
-  filter( value_prop < 10 ) # To avoid outliers
+  filter( value_prop < 9 ) # To avoid outliers
 ```
 
 The following plots sweep across SAT level, as columns, and financial need level, 
@@ -1266,7 +1585,7 @@ student_value_all %>%
       ggtitle( 
         label    = sprintf('Value Proposition (for %s resident)',residence_state), 
         subtitle = paste(
-          'Value Proposition = Adjusted Earnings/Costs',
+          'Value Proposition = Adjusted Earnings/Costs - 1.0',
           sprintf('Earnings > $%2.1fK, Cost < $%2.1fK', earnings_thresh/1000, cost_thresh/1000),
           sep = "; "
         )
@@ -1306,7 +1625,7 @@ student_value_all %>%
       ggtitle( 
         label    = sprintf('Value Proposition (for %s resident)',residence_state), 
         subtitle = paste(
-          'Value Proposition = Adjusted Earnings/Costs',
+          'Value Proposition = Adjusted Earnings/Costs - 1.0',
           sprintf('Earnings > $%2.1fK, Cost < $%2.1fK', earnings_thresh/1000, cost_thresh/1000),
           sep = "; "
         )
@@ -1347,7 +1666,7 @@ student_value_all %>%
       ggtitle( 
         label    = sprintf('Value Proposition (for %s resident)',residence_state), 
         subtitle = paste(
-          'Value Proposition = Adjusted Earnings/Costs',
+          'Value Proposition = Adjusted Earnings/Costs - 1.0',
           sprintf('Rank <= %d, Earnings >=top-quartile, Cost < $%2.1fK', rank_thresh, cost_thresh/1000),
           sep = "; "
         )
