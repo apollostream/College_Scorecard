@@ -1,14 +1,17 @@
 ---
 title: 'College Scorecard: Earnings Premium & Value Proposition'
 author: "Michael L. Thompson"
-date: "January 2, 2017"
+date: "September 2, 2017"
 output:
   pdf_document:
     toc: yes
+    toc_depth: 4
   html_notebook:
     toc: yes
+    toc_depth: 4
   html_document:
     toc: yes
+    toc_depth: 4
 always_allow_html: yes
 ---
 
@@ -29,9 +32,9 @@ library( Rtsne )
 
 The U.S. Department of Education College Scorecard database is a rich source of information intended to help students and parents understand the true costs of attending college in America.  This script leverages the database to compute an *earnings premium* and a *value proposition* for each college.
 
-**IMPORTANT: This is a quick-and-dirty stab at an analysis that serves as an exploratory data analysis.**
+**IMPORTANT: This is a stab serving as an exploratory data analysis.**
 **It's not a commentary on the actual value represented by a college. Future earnings aren't the sum total of**
-**the value of a college education, and this analysis is too crude to reliably capture even the earnings component.**
+**the value of a college education.**
 
 ### Earnings Premium
 The earnings premium for a college is the earnings in excess of the average annual earnings at 6 years after matriculation after controlling for (1) the academic abilities of the students at the college, (2) the academic discipline distribution of Bachelor's degrees of the students graduating from the college, and (3) the geographic location and campus locale of the university.
@@ -50,7 +53,7 @@ The annual costs are computed across a range of financial need levels: without f
 
 Load the [kaggle.com version of the U.S. Dept. of Education College Scorecard Dataset](kaggle.com) and generate features for modeling using similar code as used in the previously submitted ["Best Colleges for You" script](https://www.kaggle.com/apollostar/d/kaggle/college-scorecard/which-college-is-best-for-you). It uses package `RSQLite` to load the database, and we pare down the database to approximately 900 4-year Bachelor's degree granting colleges.
 
-```{r dataprep, echo = FALSE,warning=FALSE,message=FALSE }
+```{r dataprep, echo = FALSE,warning=FALSE,message=FALSE,results='hide'}
 makeQuery <- function( year, fieldNames, dfNames ){
   # The fields not included in `fieldNames`, other than "Year", should have the same value regardless of year.
   paste(
@@ -298,9 +301,9 @@ the student is enrolled at $\text{College }X$ (we use log-base-10 on the Bayes f
 \[
 \begin{aligned}
 &\operatorname{BF}_{\log10}( H = \text{College }X | E = \text{Attribute }Y ) \\
-&= \log_{10}\frac{ \operatorname{Odds}( H = \text{College }X | E = \text{Attribute }Y )}{\operatorname{Odds}( H = \text{College_X} ) )}\\
-&= \log_{10} \frac{\operatorname{P}( E = \text{Attribute }Y | H = \text{College }X )}{\operatorname{P}( E = \text{Attribute }Y | H = \lnot (\text{College }X) )}\\
-&\sim \log_{10} \frac{ \operatorname{P}( E = \text{Attribute }Y | H = \text{College }X )}{\operatorname{P}( E = \text{Attribute }Y )}\\
+&= \log_{10}\Bigg[\frac{ \operatorname{Odds}( H = \text{College }X | E = \text{Attribute }Y )}{\operatorname{Odds}( H = \text{College }X ) }\Bigg]\\
+&= \log_{10}\Bigg[ \frac{\operatorname{P}( E = \text{Attribute }Y | H = \text{College }X )}{\operatorname{P}( E = \text{Attribute }Y | H = \lnot (\text{College }X) )} \Bigg]\\
+&\approx \log_{10}\Bigg[ \frac{ \operatorname{P}( E = \text{Attribute }Y | H = \text{College }X )}{\operatorname{P}( E = \text{Attribute }Y )} \Bigg]\\
 \end{aligned}
 \]
 
@@ -314,11 +317,11 @@ For some of the probabilities used in approximating the Bayes factors, the proba
 
 But, the main challenge in using Bayes factors as features is computing the final probabilities for attributes for which only moments and quantiles are reported in the database. For such attributes, we first approximate a full probability distribution of students at the college of interest and then apply the proposition. 
 
-Take SAT for example. We are given the mean, median and quartiles for SAT scores of students at each college.  For each college, we fit a model to these values to approximate the continuous distribution of SAT scores of students at the college.  Then, for an attribute such as $\text{Attribute }Y$ = "*SAT score greater than 1400*", we compute $\operatorname{P}( E = \text{Attribute }Y | H = \text{College }X )$ by simply computing the upper tail probability of SAT with lower limit 1400.  Finally, to compute $\operatorname{P}( E = \text{Attribute }Y )$, we simply take the weighted average, across all colleges, of the previously calculated conditional probability, where the weighting is simply the proportion of students attending $\text{College }X$ amongst all students in our 900-college universe. In the database, field `UGDS` is the number of undergraduate students attending the college. So the proportion of all students attending $\text{College }X$ is $\operatorname{P}( H = \text{College }X ) =$ `UGDS[College_X]/sum( UGDS[College_X] )`.
+Take SAT for example. We are given the mean, median and quartiles for SAT scores of students at each college.  For each college, we fit a model to these values to approximate the continuous distribution of SAT scores of students at the college.  Then, for an attribute such as $\text{Attribute }Y$ = "*SAT score greater than 1400*", we compute $\operatorname{P}( E = \text{Attribute }Y | H = \text{College }X )$ by simply computing the upper tail probability of SAT with lower limit 1400.  Finally, to compute $\operatorname{P}( E = \text{Attribute }Y )$, we simply take the weighted average, across all colleges, of the previously calculated conditional probability, where the weighting is simply the proportion of students attending $\text{College }X$ amongst all students in our 900-college universe. In the database, field `UGDS[i]` is the number of undergraduate students attending a college $i$, mathematically denoted as $N_{\text{UGDS}}(\text{College }i)$. So the proportion of all students attending $\text{College }X$ is $\operatorname{P}( H = \text{College }X ) = \frac{N_{\text{UGDS}}(\text{College }X)}{\sum_i N_{\text{UGDS}}(\text{College }i)}$.
 
 For attributes like region and locale, to estimate $P( E = \text{Attribute }Y | H = \text{College }X )$, we define $\text{Attribute }Y$ to reflect preference.  So, for, say `Region == 'Great Lakes'`, $\text{Attribute }Y$ is "prefers attending college in Great Lakes region".  And, we use our own subjective knowledge to just assume that of the students attending a college in a specific region (or locale), a non-zero proportion of them preferring attending colleges an alternative region (or locale) and that the alternative regions (locales) that are more similar to the one in which the college exists would have a higher proportion of such students than alternatives that are less similar. For regions, similarity is determined by distance -- e.g., Mid-East is more similar to Great Lakes than is Far West. For locales, similarity is determined by character -- i.e., campuses in suburbs of large cities are more similar to those in large cities than are remote rural campuses.
 
-```{r features, echo=FALSE}
+```{r features, echo=FALSE,warning=FALSE,message=FALSE}
 
 #===================================================
   ### Academics: Completion rates, admissions rates and SAT scores.
@@ -623,15 +626,16 @@ hicor     <- hicor[sapply(hicor,length)>0]
 
 ```{r glmnet_cv,fig.height=8,fig.width=10}
 
-# Since we know that some of the interactions are confounded with each other and with some main effects,
-# which causes the cross-validation error to blow up, we'll find the models that have fewer terms than
-# those that blow up and plot the cross-validation mean-squared error for them.
-# Range of `lambda` determined by trial and error.
+# Since we know that some of the interactions are confounded with each other and
+# with some main effects, which causes the cross-validation error to blow up,
+# we'll find the models that have fewer terms than those that blow up and plot
+# the cross-validation mean-squared error for them. Range of `lambda` determined
+# by trial and error.
 set.seed( 2393 )
 glmnet_cv <- cv.glmnet(
-  model_mat[,setdiff(colnames(model_mat),names(hicor))], #glmdata %>% select(-outcome) %>% as.matrix(),
-  glmdata %>% select(outcome) %>% as.matrix(),
-  family='gaussian',
+  x      = model_mat[,setdiff(colnames(model_mat),names(hicor))], 
+  y      = glmdata %>% select(outcome) %>% as.matrix(),
+  family = 'gaussian',
   lambda = exp(seq(log(10),log(100),length.out = 50))
 )
 plot( glmnet_cv )
@@ -640,7 +644,8 @@ plot( glmnet_cv )
 # acv %>% coef() %>% {(.)[abs((.)[,1])>0,1]} %>% print()
 # # These are the non-zero coefficients for the model using `lambda.min`.
 # acv %>% coef(s='lambda.min') %>% {(.)[abs((.)[,1])>0,1]} %>% print()
-# These are the non-zero coefficients for the model using the geometric mean of `lambda.min` and `lambda.1se`.
+# These are the non-zero coefficients for the model using the geometric 
+# mean of `lambda.min` and `lambda.1se`.
 df_coef <- glmnet_cv %$% 
   coef(.,s=exp(mean(log(c(lambda.1se,lambda.min))))) %>% 
   { (.)[abs((.)[,1])>0,1] } %>%
@@ -652,14 +657,16 @@ df_coef %>%
 
 
 # We use that latter model.
-# It's intercept serves as the grand-mean, i.e., expected earnings of a college after controlling for the covariates
+# It's intercept serves as the grand-mean, i.e., expected earnings 
+# of a college after controlling for the covariates
 # and before adding the college's earnings premium.
-Expected_Earnings <- glmnet_cv %$% coef(.,s=exp(mean(log(c(lambda.1se,lambda.min)))))['(Intercept)',]
+Expected_Earnings <- glmnet_cv %$%
+  coef(.,s=exp(mean(log(c(lambda.1se,lambda.min)))))['(Intercept)',]
 print( Expected_Earnings )
 
 ```
 
-### Visualization of College (t-SNE Plot)
+### Visualization of College (t-SNE Biplot)
 
 Let's plot the colleges in 2-D space to see if we can find patterns.
 
@@ -684,14 +691,14 @@ tsne_out <- Rtsne( tsne_mat, perplexity = 10, initial_dims = 20 )
 ```{r tsne_glmnet,fig.height=8,fig.width=10}
 set.seed( 2393 )
 tsne_glmnet_cv <- cv.glmnet(
-  tsne_mat,
-  tsne_out$Y,
-  family='mgaussian',
+  x      = tsne_mat,
+  y      = tsne_out$Y,
+  family = 'mgaussian',
   lambda = exp(seq(log(0.1),log(10),length.out = 50))
 )
 plot( tsne_glmnet_cv )
 
-#tsne_glmnet_coef <- tsne_glmnet_cv %$% coef(.,s=exp(mean(log(c(lambda.1se,lambda.min)))))
+
 tsne_glmnet_coef <- tsne_glmnet_cv %>% coef()
 tsne_glmnet_coef$y1 %>%
 { (.)[abs((.)[,1])>0,1] } %>%
@@ -721,13 +728,13 @@ tsne_coef_df <-
   ) %>% 
   filter( abs(Y1) > 1.0E-9 | abs(Y2) > 1.0E-9 )
 
-tsne_coef_df %>%
-{
-  ggplot(., aes(x=Y1,y=Y2,label=Coefficient)) +
-    geom_point() +
-    geom_text( check_overlap = TRUE )
-} %>%
-  print()
+# tsne_coef_df %>%
+# {
+#   ggplot(., aes(x=Y1,y=Y2,label=Coefficient)) +
+#     geom_point() +
+#     geom_text( check_overlap = TRUE )
+# } %>%
+#   print()
 
 key_terms <- tsne_coef_df %>% 
   mutate(mag= sqrt(Y1^2+Y2^2)) %>% 
@@ -754,21 +761,41 @@ college_names <- glmdata %>%
   { gsub('North[^ ]+','N',.)} %>%
   { gsub('South[^ ]+','S',.)} %>%
   { gsub('West[^ ]+','W',.)} %>%
-  { gsub('East[^ ]+','E',.)}
+  { gsub('East[^ ]+','E',.)} %>%
+  { gsub(' U-','-',.)} %>%
+  { gsub('-Penn St ','',.)} %>%
+  { gsub(' Col *$','',.)} %>%
+  { gsub('-(Main)* Campus','',.)} %>%
+  { gsub('^PennSt([^-]+)$','Penn St-\\1',.)} %>%
+  { gsub('and','&',.)} %>%
+  { gsub('Agricultural & Mechanical','A&M',.)}
+
+st_abb <- state.abb %>% setNames( state.name )
+for( st_nm in names(st_abb) ){
+  college_names %<>% { gsub(st_nm,st_abb[st_nm],.) }
+}
 
 categories <- { 
   tsne_mat[,key_terms] %*% 
     (tsne_coef_df %>% filter(Coefficient %in% key_terms) %$% Y2) 
-  } %>%
-  sapply(function(x,q){ length(q) - sum(x>q) + 1 },q=quantile(.,c(0.1,0.25,0.75,0.9))) %>%
+} %>%
+  sapply(
+    function(x,q){ length(q) - sum(x>q) + 1 },
+    q=quantile(.,c(0.1,0.25,0.75,0.9))
+  ) %>%
   factor()
 
 tsne_df <- tsne_out$Y %>% 
   as_tibble() %>% 
   setNames(c("Y1","Y2")) %>% 
-  mutate( College = college_names, category = categories, Y2 = -Y2 ) %>% 
-  dplyr::select( College, category, everything() ) %>% 
-  mutate_at(funs(1.5*scale(.)),.vars=vars(Y1,Y2))
+  mutate( 
+    College = college_names, 
+    category = categories, 
+    Y2 = -Y2, 
+    Earnings = glmdata %>% filter(Year2003==0) %$% outcome
+  ) %>% 
+  dplyr::select( College, category, Earnings, everything() ) %>% 
+  mutate_at(funs(1.7*scale(.)),.vars=vars(Y1,Y2))
 
 tsne_df %>%
   { 
@@ -778,17 +805,20 @@ tsne_df %>%
       theme( text = element_text( face = 'bold' ) )
   } %>%
   print()
+```
 
+```{r biplot, warning=FALSE,message=FALSE,fig.height=9,fig.width=10}
 
 tsne_coef_df %>% 
   mutate( mag = sqrt(Y1^2 + Y2^2) ) %>%
   {
     ggplot(., aes( x = Y1, y = Y2 ) ) +
-      geom_point( color = 'red' ) +
+      geom_point( color = 'red', alpha = 0.1 ) +
       geom_text( 
         aes( label = Coefficient), 
-        color = 'red', 
-        size = 3, 
+        color = 'red',
+        alpha = 0.7,
+        size = 2, 
         check_overlap = TRUE 
       ) + 
       geom_segment(
@@ -796,6 +826,7 @@ tsne_coef_df %>%
         data = (.) %>% filter(mag>1),
         aes( x=0, y=0, xend=Y1, yend=Y2 ),
         color = 'red',
+        alpha = 0.3,
         arrow = arrow(length = unit(0.03, "npc"))
       ) + 
       geom_text(
@@ -807,8 +838,8 @@ tsne_coef_df %>%
         size=3,
         check_overlap = TRUE
       )  +
-      geom_point( data=tsne_df, aes(x=Y1,y=Y2), alpha=0.3) +
-      ggtitle( "t-SNE Biplot" , subtitle = "(black = item, red = dimension)") +
+      geom_point( data=tsne_df, aes(x=Y1,y=Y2, size = Earnings ), color='blue',alpha=0.1) +
+      ggtitle( "t-SNE Biplot" , subtitle = "(blue = item, red = dimension)") +
       theme( text = element_text( face = 'bold' ) )
   } %>%
   print()
@@ -1403,15 +1434,18 @@ Hope you found this to be interesting and it prompts you to dig deeper and to do
 
 ## Copyright Notice
 
-=======================================================================================    
-Copyright 2017 Michael L. Thompson    
-=======================================================================================    
+---
+
+Copyright 2017 Michael L. Thompson
+
+---
+
 "collegeValue.Rmd" reapplies portions of 
 "BestCollegeforYou_KaggleSubmission.Rmd" originally submitted to the kaggle.com
 competition "US Dept of Education: College Scorecard" under the Apache License, v. 2.0.
 at https://www.kaggle.com/apollostar/d/kaggle/college-scorecard/which-college-is-best-for-you
 
-=======================================================================================    
+---
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -1425,4 +1459,4 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-=======================================================================================
+---
