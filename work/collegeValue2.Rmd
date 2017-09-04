@@ -3,13 +3,13 @@ title: 'College Scorecard: Earnings Premium & Value Proposition'
 author: "Michael L. Thompson"
 date: "September 2, 2017"
 output:
+  pdf_document:
+    toc: yes
+    toc_depth: 4
   html_notebook:
     toc: yes
     toc_depth: 4
   html_document:
-    toc: yes
-    toc_depth: 4
-  pdf_document:
     toc: yes
     toc_depth: 4
 always_allow_html: yes
