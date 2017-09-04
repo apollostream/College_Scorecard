@@ -830,7 +830,7 @@ college_names <- glmdata %>%
   { gsub(' Col *$','',.)} %>%
   { gsub('-(Main)* Campus','',.)} %>%
   { gsub('^PennSt([^-]+)$','Penn St-\\1',.)} %>%
-  { gsub('and','&',.)} %>%
+  { gsub(' and ','&',.)} %>%
   { gsub('Agricultural & Mechanical','A&M',.)}
 
 st_abb <- state.abb %>% setNames( state.name )
@@ -882,7 +882,7 @@ y2_min <- -3.5
 tsne_coef_df %>% 
   mutate( 
     mag = sqrt(Y1^2 + Y2^2),
-    Y2 = pmax(y2_min,Y2)
+    Y2 = pmax(y2_min,Y2),
     Coefficient = gsub('\\([^)]+\\)','',gsub('BF_','',Coefficient))
   ) %>%
   {
@@ -1072,7 +1072,7 @@ for(j in seq_along(prs)) {
 ```
 #### Hierarchical Clustering
 
-```{r hclustering, warning=FALSE,message=FALSE}
+```{r hclustering, warning=FALSE,message=FALSE,fig.height=10,fig.width=11}
 tsne_mat_hc <- tsne_df %>% select(Y1,Y2) %>% as.matrix() %>% set_rownames(tsne_df$College)
 hc <- hclust( d = dist( tsne_mat_hc ), method = 'single' )
 n_cluster <- 30
