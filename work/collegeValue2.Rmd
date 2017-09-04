@@ -138,7 +138,10 @@ fieldNames <-
     "PCTPELL",
     "SATVR25","SATVR75","SATMT25","SATMT75","SATVRMID","SATMTMID","SATWRMID","SAT_AVG","SAT_AVG_ALL",
     "C150_4_POOLED_SUPP",
-    "md_earn_wne_p6","md_earn_wne_p8","md_earn_wne_p10"
+    "C150_4_WHITE","C150_4_BLACK","C150_4_HISP","C150_4_ASIAN",'C150_4_NRA',
+    "md_earn_wne_p6","md_earn_wne_p8","md_earn_wne_p10",
+    "pct_white","pct_black","pct_asian","pct_hispanic","pct_ba","pct_grad_prof",
+      "pct_born_us","md_faminc","median_hh_inc"
   )
 
 # Upper case variables are from 2013 and lower case variables are from the
@@ -1075,7 +1078,7 @@ for(j in seq_along(prs)) {
 ```{r hclustering, warning=FALSE,message=FALSE,fig.height=10,fig.width=11}
 tsne_mat_hc <- tsne_df %>% select(Y1,Y2) %>% as.matrix() %>% set_rownames(tsne_df$College)
 hc <- hclust( d = dist( tsne_mat_hc ), method = 'single' )
-n_cluster <- 30
+n_cluster <- 45
 cluster_id <- cutree( hc, k = n_cluster )
 
 # plot( tsne_mat_hc, pch=20, cex=0.5 )
@@ -1101,6 +1104,7 @@ tsne_mat_hc %>%
   } %>%
   print()
 
+cluster_id <- cutree( hc, k = n_cluster )
 y2_min <- -3.5
 tsne_coef_df %>% 
   mutate( 
@@ -1131,7 +1135,7 @@ tsne_coef_df %>%
           as_tibble() %>%
           mutate( 
             College = names(cluster_id), 
-            cluster = factor( cluster_id )
+            cluster = factor( (cluster_id %% 7) + 1 )
           ),
         aes( x=Y1, y=Y2, label=College, color = cluster ),
         mapping=,
@@ -1144,9 +1148,10 @@ tsne_coef_df %>%
           as_tibble() %>%
           mutate( 
             College = names(cluster_id), 
-            cluster = factor( cluster_id )
+            cluster = factor( (cluster_id %% 7) + 1 ),
+            cluster_shape = factor( (cluster_id %% 6) + 1 )
           ), 
-        aes(x=Y1,y=Y2, color = cluster ), 
+        aes(x=Y1,y=Y2, color = cluster, shape = cluster_shape ), 
         show.legend = FALSE,
         alpha=0.3
       ) +

@@ -27,3 +27,5 @@ vignettes/*.pdf
 *.sqlite
 # Markdown notebook preview files
 *.nb.html
+# Clustering output files
+work/output*.txt
