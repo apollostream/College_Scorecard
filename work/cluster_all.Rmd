@@ -3,13 +3,13 @@ title: 'College Scorecard: Cluster Analysis'
 author: "Michael L. Thompson"
 date: "September 4, 2017"
 output:
-  pdf_document:
-    toc: yes
-    toc_depth: 4
   html_notebook:
     toc: yes
     toc_depth: 4
   html_document:
+    toc: yes
+    toc_depth: 4
+  pdf_document:
     toc: yes
     toc_depth: 4
 always_allow_html: yes
@@ -18,8 +18,10 @@ always_allow_html: yes
 ## Introduction
 
 This is an exploratory analysis of the U.S. Dept. of Education College Scorecard database.  My intent is to 
-investigate patterns amongst the colleges as visualized using t-distributed Stochastic Neighbor Embedding (t-SNE). This method projects the high-dimensional data into two dimensions. From there, I can apply hierarchical clustering to identify clusters in the new 
-2-D space.
+investigate patterns amongst the colleges as visualized using 
+[t-distributed Stochastic Neighbor Embedding (t-SNE)](http://lvdmaaten.github.io/tsne/). 
+This method projects the high-dimensional data into two dimensions. 
+From there, I can apply hierarchical clustering to identify clusters in the new 2-D space.
 
 ## Prepare Data
 
@@ -51,7 +53,7 @@ like geographic location, campus setting, student ethnicity, etc.
 ```{r make_df,warning=FALSE,message=FALSE}
 glmdata_all <- DataSpec$studentBF %>%
   dplyr::select(
-    c(-1, -(3:8)), -matches('[^4]_(WHITE|BLACK|ASIAN|OTHER|HISP|NRA|AIAN|UNKN)|2MOR|UNKN|NHPI|AIAN|BF_male|BF_is1st|IND_INC|DEP_INC|(LibraryScience)'),
+    c(-1, -(3:8)), -matches('_(WHITE|BLACK|ASIAN|OTHER|HISP|NRA|AIAN|UNKN)|2MOR|UNKN|NHPI|AIAN|BF_male|BF_is1st|IND_INC|DEP_INC|(LibraryScience)|(^discBreadth$)|female'),
     -matches('Challenge|_DEP_STAT_|notvet|le24y|OUTOFSTATE|prior|(^BF_[gl][et].+[0-9]+K$)|locale|FarWest|Plains|RockyM|GreatLakes|Southwest|Southeast|NewEngland|MidEast') 
   ) %>% 
   select_if( .predicate = function(x) any(x != x[[1]]) ) %>% 
@@ -62,13 +64,36 @@ tsne_mat_all <- glmdata_all %>% select(-College) %>% as.matrix() %>% scale()
 
 ## Perform t-Distributed Stochastic Neighbor Embedding (t-SNE)
 
-Now, I'll map the data into a 2-D space.  Hopefully, it will be easy to see clusters of colleges.
+Now, I'll map the data into a 2-D space using [t-SNE](http://lvdmaaten.github.io/tsne/).  
+Hopefully, it will be easy to see clusters of colleges.
 
 It takes a bit of trial and error (short of doing a formal hyperparameter optimization) to arrive
 at hyperparameters capable of generating discernible structure in a 2-D scatterplot.
 
 ```{r tsne }
-tsne_all <- Rtsne( tsne_mat_all, perplexity = 10, initial_dims = 12 ) 
+set.seed( 173 )
+tsne_all <- Rtsne( tsne_mat_all, perplexity = 10, initial_dims = 50, theta = 0.5, max_iter = 2000 )
+
+# Rotate coordinates so that high-prestige colleges appear at high Y2 coordinates, 
+# i.e. in the top center of the plot.
+i_harvard <- grep( 'Harvard', glmdata_all$College )
+harvard_coord <- tsne_all$Y[i_harvard,]
+harvard_angle <- atan(harvard_coord[2]/harvard_coord[1])
+rotate_angle  <- pi/2 - harvard_angle
+rotation_matrix <- matrix(
+  c(cos(rotate_angle),sin(rotate_angle),-sin(rotate_angle),cos(rotate_angle)),
+  2,2, byrow = TRUE
+)
+tsne_all$Y %<>% { (.) %*% rotation_matrix }
+if( abs(tsne_all$Y[i_harvard,2]) < abs(tsne_all$Y[i_harvard,1]) ){
+  tmp <- tsne_all$Y[,1]
+  tsne_all$Y[,1] <- tsne_all$Y[,2]
+  tsne_all$Y[,2] <- tmp
+}
+if( tsne_all$Y[i_harvard,2] < 0 ){
+  tsne_all$Y[,2] <- -tsne_all$Y[,2]
+}
+
 ```
 
 ```{r tsne_plot,fig.height=10,fig.width=11}
@@ -77,14 +102,22 @@ tsne_all$Y %>%
   setNames(c('Y1','Y2')) %>%
   { 
     ggplot(.,aes(x=Y1,y=Y2)) + 
-      geom_point() 
+      geom_point() +
+      geom_text(
+        data=(.) %>% mutate(College=glmdata_all$College) %>% filter(grepl('Harvard',College)),
+        mapping=aes(label=College),
+        color='red',
+        size=4
+      )
   } %>% 
   print()
+
 ```
 
 
 ### Find Underlying Dimension Driving 2-D Structure
 
+Using [`glmnet`](https://www.jstatsoft.org/article/view/v033i01), 
 I perform variable selection modeling of the 2-D t-SNE coordinates as responses vs. the
 original features from which the t-SNE coordinates were found.  This way we'll have an
 approximate linear model showing which features contributed to which coordinate.  As such,
@@ -103,22 +136,24 @@ tsne_glmnet_all <- cv.glmnet(
   x      = mmat,
   y      = tsne_all$Y,
   family = 'mgaussian',
-  lambda = exp(seq(log(1),log(10),length.out = 50))
+  lambda = exp(seq(log(0.1),log(10),length.out = 50))
 )
 plot( tsne_glmnet_all )
 ```
 
 ### Check the Predictions
 
-It's tricky to find a subset of features and their interactions that both describe the
+It can be tricky to find a subset of features and their interactions that both describe the
 t-SNE coordinates well *and* do not suffer from extreme collinearity, which can make the
 validation error at low `lambda` explode when applying `glmnet`.
 
+Judging from the cross-validation curve above and the observed vs. predicted plots below, it looks
+like we've got a pretty good model.
 
-These predictions suck!  (... at least for the moment.)
 
 ```{r pred_check}
-pred <- tsne_glmnet_all %>% predict( newx = mmat ) %>% drop()
+lambda <- tsne_glmnet_all %$% { exp( mean(log(c(lambda.min,lambda.1se))) ) }
+pred <- tsne_glmnet_all %>% predict( newx = mmat, s = lambda ) %>% drop()
 plot(pred[,1],tsne_all$Y[,1])
 plot(pred[,2],tsne_all$Y[,2])
 ```
@@ -128,7 +163,7 @@ plot(pred[,2],tsne_all$Y[,2])
 
 ```{r derive_dimensions}
 
-tsne_glmnet_coef_all <- tsne_glmnet_all %>% coef()
+tsne_glmnet_coef_all <- tsne_glmnet_all %>% coef( s = lambda )
 # tsne_glmnet_coef_all$y1[-1] %>%
 # { (.)[abs((.)[,1])>0,1] } %>%
 # { data_frame(Coefficient = names(.), value = round(.,2)) } %>%
@@ -154,7 +189,12 @@ tsne_coef_df_all <-
       setNames(c("Coefficient","Y2")),
     by = "Coefficient"
   ) %>% 
-  filter( abs(Y1) > 1.0E-9 | abs(Y2) > 1.0E-9 ) %>% slice(-1)
+  filter( abs(Y1) > 1.0E-9 | abs(Y2) > 1.0E-9 ) %>% slice(-1) %>%
+  mutate(
+    # Flip direction of interactions
+    Y1 = ifelse( grepl(':',Coefficient), -Y1 , Y1 ),
+    Y2 = ifelse( grepl(':',Coefficient), -Y2 , Y2 )
+  )
 
 tsne_coef_df_all %>% mutate(mag = sqrt(Y1^2+Y2^2)) %>% arrange(desc(mag)) %>% print(n = 30)
 
@@ -227,7 +267,7 @@ tsne_df_all <- tsne_all$Y %>%
     BF_Income_gt110K = glmdata_all %$% {10.0^BF_p_gt110K}
   ) %>% 
   dplyr::select( College, category, BF_Income_gt110K, everything() ) %>% 
-  mutate_at(funs(1.7*scale(.)),.vars=vars(Y1,Y2))
+  mutate_at(funs(scale(.)),.vars=vars(Y1,Y2))
 ```
 
 
@@ -255,10 +295,10 @@ f_mult <- max(sqrt(tsne_df_all$Y1^2 + tsne_df_all$Y2^2))/max(sqrt(tsne_coef_df_a
 y2_min <- -3.5
 tsne_coef_df_all %>% 
   mutate( 
-    mag = sqrt(Y1^2 + Y2^2),
     Y2 = pmax(y2_min,Y2*f_mult),
     Y1 = Y1*f_mult,
-    Coefficient = gsub('\\([^)]+\\)','',gsub('BF_','',Coefficient))
+    mag = sqrt(Y1^2 + Y2^2),
+    Coefficient = gsub('\\([^)]+\\)|(_*2005)|_','',gsub('BF_','',Coefficient))
   ) %>%
   {
     ggplot(., aes( x = Y1, y = Y2 ) ) +
@@ -289,9 +329,9 @@ tsne_coef_df_all %>%
       )  +
       geom_point( data=tsne_df_all, aes(x=Y1,y=Y2, size = BF_Income_gt110K ), color='blue',alpha=0.1) +
       ggtitle( "t-SNE Biplot" , subtitle = "(blue = college, red = feature)") +
-      theme( text = element_text( face = 'bold' ) ) +
+      theme( text = element_text( face = 'bold' ) ) #+
       #scale_y_continuous(limits = c(y2_min,4))
-    scale_y_continuous(limits = c(y2_min,4))
+    #scale_y_continuous(limits = c(y2_min,4))
   } %>%
   print()
 ```
@@ -355,7 +395,7 @@ Now, I perform cluster analysis.  Hierarchical clustering is a quick way to iden
 ```{r clustering}
 tsne_mat_hc_all <- tsne_df_all %>% select(Y1,Y2) %>% as.matrix() %>% set_rownames(tsne_df_all$College)
 hc_all <- hclust( d = dist( tsne_mat_hc_all ), method = 'single' )
-n_cluster <- 45
+n_cluster <- 55
 cluster_id_all <- cutree( hc_all, k = n_cluster )
 
 # plot( tsne_mat_hc, pch=20, cex=0.5 )
@@ -390,12 +430,50 @@ Finally, we can overlay the feature dimensions on the 2-D
 ```{r biplot2,fig.height=10,fig.width=11}
 cluster_id_all <- cutree( hc_all, k = n_cluster )
 y2_min <- -4
-tsne_coef_df_all %>% 
+y2_max <- 3.49
+y1 <- range(tsne_mat_hc_all[,1])
+y1[1] <- 0.5*floor(y1[1]/0.5)
+y1[2] <- 0.5*ceiling(y1[2]/0.5)
+y2 <- range(tsne_mat_hc_all[,2])
+y2[1] <- 0.5*floor(y2[1]/0.5)
+y2[2] <- 0.5*ceiling(y2[2]/0.5)
+
+is_out_of_bounds <- function(x,bounds){ x<bounds[1] | x>bounds[2] }
+# Assumes that value violating bounds is of same sign as bound violated AND that bounds are of opposite signs.
+bound_factor <- function(x,bounds){
+  f1 <- ifelse(x<bounds[1],x/bounds[1],0)
+  f2 <- ifelse(x>bounds[2],x/bounds[2],0)
+  mapply(function(b1,b2) if(b1>b2) c(1,b1) else c(2,b2),f1,f2)
+}
+tsne_modified <- tsne_coef_df_all %>% 
   mutate( 
-    mag = sqrt(Y1^2 + Y2^2) ,
-    Y2 = pmax(y2_min,Y2),
-    Coefficient = gsub('\\([^)]+\\)','',gsub('BF_','',Coefficient))
-  ) %>%
+    Coefficient = gsub('\\([^)]+\\)|(_*2005)|_','',gsub('BF_','',Coefficient)),
+    Y1  = f_mult*Y1,
+    Y2  = f_mult*Y2 ,
+    mag = sqrt(Y1^2 + Y2^2)
+  ) 
+
+# check bounds to find if any violated
+bchk1 <- bound_factor(tsne_modified$Y1,y1)
+bchk2 <- bound_factor(tsne_modified$Y2,y2)
+# bound on Y1 violated
+w1 <- which(bchk1[2,] != 0)
+# bound on Y2 violated
+w2 <- which(bchk2[2,] != 0)
+# Keep only coord Y1 or Y2 violated the most by each violating pt.
+for( i in intersect(w1,w2)) { if(bchk1[2,i]>bchk2[2,i]) w2<-setdiff(w2,i) else w1<- setdiff(w1,i) }
+# bound on Y1 violated: fix it
+for( i in w1 ){
+  tsne_modified$Y2[i] <- tsne_modified$Y2[i]*y1[bchk1[1,i]]/tsne_modified$Y1[i]
+  tsne_modified$Y1[i] <- y1[bchk1[1,i]]
+}
+# bound on Y2 violated: fix it
+for( i in w2 ){
+  tsne_modified$Y1[i] <- tsne_modified$Y1[i]*y2[bchk2[1,i]]/tsne_modified$Y2[i]
+  tsne_modified$Y2[i] <- y2[bchk2[1,i]]
+}
+
+tsne_modified %>%
   {
     ggplot(., aes( x = Y1, y = Y2 ) ) +
       geom_point( color = 'red', alpha = 0.1 ) + 
@@ -440,15 +518,57 @@ tsne_coef_df_all %>%
         alpha=0.3
       ) +
       ggtitle( "t-SNE Biplot" ) +
-      theme( text = element_text( face = 'bold' ) ) +
-      scale_y_continuous(limits = c(y2_min,5))
+      theme( text = element_text( face = 'bold' ) ) #+
+      #scale_y_continuous(limits = c(y2_min,5))
   } %>%
   print()
 ```
 
 ## Conclusions
 
-**TBD**
+We do find some structure in the plot. And, the rotation of the axis to put Harvard University at the
+top-center helps us to interpret the axes and give meaning to that structure. 
+
+### Notable clusters
+
+Clusters are colored with repeating colors and marked with repeating symbols, reflecting a limit
+of **ggplot2**. But each cluster should have an unique color-symbol combination.
+
++   **Ivy Leagues** (orange pluses @ {0,3})
++   **Big Publics (Land-Grants)** (lavender asterisks @ {-2,1.5})
+    +   **Cal-State System**
++   **HCBU: haves & have-nots** (gold triangles @ {-2.5,-2})
++   **Techies** (Orange dots @ {3.3,-1.7})
++   **Artsies** (Green dpts @ {2,-3.5})
++   **Religious** (green boxed X's @ {2.5,0})
++   **Back-to-Schools & Late-Bloomers** (green pluses @ {-1,-1})
+    (>24yrs-old, veterans)
+
+
+### Interpretation of Quadrants
+
+The combination of cluster locations and Bayes factors feature rays helps us assign meaning to
+each quadrant of the biplot.
+
+#### Elite private & top-academic public, wealthy & smart
+
+The vertical `Y2` axis is now almost perfectly aligned with the ray `pgt110K`, which is the ($\log_{10}$) Bayes factor capturing the prevalance of students from
+families with annual incomes greater than $110,000. All the Ivy League, "Ivy wannabes", and top-academic public universities (e.g., Cal-Berkeley, U. Michigan-Ann Arbor) are
+aligned along the positive vertical axis. That axis is almost perfectly countered by the downward-pointed ray `SATle800`, which is the Bayes factor capturing the prevalance of students with combined Verbal & Math SAT scores less than or equal to 800, i.e., the lowest tail of SAT scores.
+
+### Breadth versus specialization
+
+The horizontal `Y1` axis isn't so readily interpretable. However, we see the ray `discBreadth`, whcih is the feature capturing the entropy (variety) in academic disciplines in which
+degrees are offered from the college, is pointing into the upper-left corner of the plot. So colleges aligned along this ray in the upper-right quadrant are the big public state universities that offer a broad range of degrees.  On the other hand, the narrowly, highly specialized colleges appear in the lower-right quadrant of the plot.
+
+### Pell grants & high 3-yr credit default rates
+
+The colleges in the lower-left quadrant are the colleges most strongly aligned with rays `pellever`, which captures prevalence of students having ever received a federal Pell grant, and `CDR3est`, which captures prevalence of students defaulting on student loans within 3 years of leaving
+the college.
+
+### More privates, but less elite
+
+The upper-right quadrant is aligned with `SAT1400` (highest SAT students), `fsend5` (applied to many colleges), and `pgt48Kle75K` (mid-income families).
 
 
 ## Summary
