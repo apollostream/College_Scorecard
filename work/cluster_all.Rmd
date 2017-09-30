@@ -3,25 +3,31 @@ title: 'College Scorecard: Cluster Analysis'
 author: "Michael L. Thompson"
 date: "September 4, 2017"
 output:
+  pdf_document:
+    toc: yes
+    toc_depth: 4
   html_notebook:
     toc: yes
     toc_depth: 4
   html_document:
     toc: yes
     toc_depth: 4
-  pdf_document:
-    toc: yes
-    toc_depth: 4
+linkcolor: red
 always_allow_html: yes
+urlcolor: blue
 ---
 
 ## Introduction
 
 This is an exploratory analysis of the U.S. Dept. of Education College Scorecard database.  My intent is to 
 investigate patterns amongst the colleges as visualized using 
-[t-distributed Stochastic Neighbor Embedding (t-SNE)](http://lvdmaaten.github.io/tsne/). 
+[t-distributed Stochastic Neighbor Embedding](http://lvdmaaten.github.io/tsne/) (t-SNE)[^1] using the R package **Rtsne**[^2]. 
 This method projects the high-dimensional data into two dimensions. 
 From there, I can apply hierarchical clustering to identify clusters in the new 2-D space.
+
+[^1]: L.J.P. van der Maaten. **Accelerating t-SNE using Tree-Based Algorithms.** *Journal of Machine Learning Research* 15(Oct):3221-3245, 2014.  [PDF](http://lvdmaaten.github.io/publications/papers/JMLR_2014.pdf) [[Supplemental material]](http://lvdmaaten.github.io/publications/misc/Supplement_JMLR_2014.pdf)
+
+[^2]: Jesse H. Krijthe (2015). **Rtsne: T-Distributed Stochastic Neighbor Embedding using a Barnes-Hut Implementation**, URL: [https://github.com/jkrijthe/Rtsne](https://github.com/jkrijthe/Rtsne)
 
 ## Prepare Data
 
@@ -64,8 +70,7 @@ tsne_mat_all <- glmdata_all %>% select(-College) %>% as.matrix() %>% scale()
 
 ## Perform t-Distributed Stochastic Neighbor Embedding (t-SNE)
 
-Now, I'll map the data into a 2-D space using [t-SNE](http://lvdmaaten.github.io/tsne/).  
-Hopefully, it will be easy to see clusters of colleges.
+Now, I'll map the data into a 2-D space using [t-SNE](http://lvdmaaten.github.io/tsne/).  Hopefully, it will be easy to see clusters of colleges.
 
 It takes a bit of trial and error (short of doing a formal hyperparameter optimization) to arrive
 at hyperparameters capable of generating discernible structure in a 2-D scatterplot.
@@ -73,7 +78,14 @@ at hyperparameters capable of generating discernible structure in a 2-D scatterp
 ```{r tsne }
 set.seed( 173 )
 tsne_all <- Rtsne( tsne_mat_all, perplexity = 10, initial_dims = 50, theta = 0.5, max_iter = 2000 )
+```
 
+### Rotate Coordinates
+
+Now, I'll rotate the coordinates so that high-prestige colleges appear at high `Y2` coordinates. This will put most of the
+Ivy League colleges in the top-center of the plot.
+
+```{r rotate }
 # Rotate coordinates so that high-prestige colleges appear at high Y2 coordinates, 
 # i.e. in the top center of the plot.
 i_harvard <- grep( 'Harvard', glmdata_all$College )
@@ -96,18 +108,37 @@ if( tsne_all$Y[i_harvard,2] < 0 ){
 
 ```
 
+
+I'll highlight colleges at the minimum and maximum of each of the coordinate axes and diagonals.  This is done by projecting
+each college's coordinates onto vectors pointing into those 4 direction vectors -- up, right, top-right, top-left -- 
+and finding the colleges that are at the maximum positive and negative points along those vectors.
+
+The names of those colleges at the extremes are added along with "Harvard" as names to be highlighted in the 2-D scatterplot.
+
 ```{r tsne_plot,fig.height=10,fig.width=11}
+# Project each college's coordinates along the 4 direction vectors.
+prj <- tsne_all$Y %*% matrix(c(1,0,0,1,1,1,-1,1),nrow=2,ncol=4)
+
+# Identify the colleges to be highlighted as Harvard and those at the min and max of the direction vectors.
+highlights <- union(
+  'Harvard',
+  as.character(glmdata_all$College)[c(apply(prj,2,function(x) c(which.min(x),which.max(x))))]
+) %>% 
+  paste(collapse="|")
+
+# Plot the 2D scatterplot with highlighted colleges labeled by the college name.
 tsne_all$Y %>% 
   as_tibble() %>% 
   setNames(c('Y1','Y2')) %>%
+  mutate( College = glmdata_all$College) %>% 
   { 
     ggplot(.,aes(x=Y1,y=Y2)) + 
       geom_point() +
       geom_text(
-        data=(.) %>% mutate(College=glmdata_all$College) %>% filter(grepl('Harvard',College)),
-        mapping=aes(label=College),
-        color='red',
-        size=4
+        data    = (.) %>% filter( grepl(highlights,College) ),
+        mapping = aes( label = College ),
+        color   = 'red',
+        size    = 4
       )
   } %>% 
   print()
@@ -115,14 +146,16 @@ tsne_all$Y %>%
 ```
 
 
-### Find Underlying Dimension Driving 2-D Structure
+### Find Underlying Factors Driving 2-D Structure
 
-Using [`glmnet`](https://www.jstatsoft.org/article/view/v033i01), 
-I perform variable selection modeling of the 2-D t-SNE coordinates as responses vs. the
-original features from which the t-SNE coordinates were found.  This way we'll have an
-approximate linear model showing which features contributed to which coordinate.  As such,
+Using R package [**glmnet**](https://www.jstatsoft.org/article/view/v033i01)[^3], 
+I perform regularization (variable selection) in modeling of the 2-D t-SNE coordinates as responses vs. the
+original college Bayes factor features from which the t-SNE coordinates were found.  This way we'll have a
+linear model showing which features contributed to which coordinate.  As such,
 we'll have the basis for plotting a biplot of colleges overlayed on feature dimensions in 2-D, 
 analogous to a PCA biplot.
+
+[^3]: Jerome Friedman, Trevor Hastie, Robert Tibshirani (2010). **Regularization Paths for Generalized Linear Models via Coordinate Descent.** *Journal of Statistical Software*, 33(1), 1-22. URL http://www.jstatsoft.org/v33/i01/.
 
 ```{r prep_glmnet}
 mmat <- model.matrix( ~ .:. - 1, as.data.frame(tsne_mat_all))
@@ -136,7 +169,7 @@ tsne_glmnet_all <- cv.glmnet(
   x      = mmat,
   y      = tsne_all$Y,
   family = 'mgaussian',
-  lambda = exp(seq(log(0.1),log(10),length.out = 50))
+  lambda = exp(seq(log(0.05),log(10),length.out = 20))
 )
 plot( tsne_glmnet_all )
 ```
@@ -145,17 +178,45 @@ plot( tsne_glmnet_all )
 
 It can be tricky to find a subset of features and their interactions that both describe the
 t-SNE coordinates well *and* do not suffer from extreme collinearity, which can make the
-validation error at low `lambda` explode when applying `glmnet`.
+validation error at low `lambda` explode when applying function `cv.glmnet()`.
 
 Judging from the cross-validation curve above and the observed vs. predicted plots below, it looks
-like we've got a pretty good model.
+like we've got a decent model.
 
 
-```{r pred_check}
-lambda <- tsne_glmnet_all %$% { exp( mean(log(c(lambda.min,lambda.1se))) ) }
-pred <- tsne_glmnet_all %>% predict( newx = mmat, s = lambda ) %>% drop()
-plot(pred[,1],tsne_all$Y[,1])
-plot(pred[,2],tsne_all$Y[,2])
+```{r pred_check, warning=FALSE, fig.width=10, fig.height=8}
+# Get glmnet predictions of the t-SNE coordinates, combine them with the original t-SNE coordinates,
+# and plot the originals vs. predictions.
+lambda <- tsne_glmnet_all %$% { exp( mean(log(c(lambda.min,lambda.1se))) ) } # mid lambda
+
+pred_df <- tsne_glmnet_all %>% 
+  predict( newx = mmat, s = lambda ) %>% 
+  drop() %>% 
+  as_data_frame() %>% 
+  setNames( c( "Y1", "Y2" ) ) %>%
+  mutate( rowid = 1:nrow(.) )
+
+tsne_df <- tsne_all$Y %>% 
+  as_data_frame() %>% 
+  setNames( c( "Y1", "Y2" ) ) %>% 
+  mutate( rowid = 1:nrow(.) ) %>%
+  gather( key = Coordinate, value = Value , -rowid )
+
+combo_df <- pred_df %>%
+  gather( key = Coordinate, value = Value , -rowid ) %>%
+  left_join( tsne_df, by = c('Coordinate','rowid'), suffix = c( "_glmnet","_tSNE" ) )
+
+combo_df %>%
+{
+  ggplot(., aes(x = Value_glmnet, y = Value_tSNE ) ) +
+    geom_point( alpha = 0.3 ) +
+    geom_abline( intercept = 0, slope = 1, color = 'red', linetype = 2, size = 1 ) +
+    facet_wrap( ~ Coordinate ) +
+    ggtitle( "t-SNE coordinates vs. glmnet predictions" ) +
+    theme( text = element_text( face = 'bold' ) )
+}
+
+rm( pred_df, tsne_df, combo_df )
 ```
 
 ## Visualize the Colleges in 2-D
@@ -212,41 +273,48 @@ key_terms <- tsne_coef_df_all %>%
   filter(abs(mag)>quantile(abs(mag),0.9)) %>% 
   arrange(desc(mag)) %$% Coefficient %>% setdiff("(Intercept)")
 
-
-college_names <- glmdata_all %$% 
-  College %>%
-  { gsub('^[0-9_]+','',. ) } %>%
-  { gsub('Northwestern University','NU',.) } %>%
-  { gsub('University of Notre Dame','Notre Dame U.',.) } %>%
-  { gsub('Cornell University','Cornell U.',.) } %>%
-  { gsub('California','Cal',. ) } %>%
-  { gsub('Mass.+Inst.+Tech.+','MIT',. ) } %>%
-  { gsub('(Mass|Penn|Wash)[^ ]+ *','\\1',.) } %>%
-  { gsub('Polytechnic','Poly',. ) } %>%
-  { gsub('Institute of Tech[^ ]+','IT',. ) } %>%
-  { gsub('Tech.+Inst.+','Tech',. ) } %>%
-  { gsub('State','St',. ) } %>%
-  { gsub('University','U',. ) } %>%
-  { gsub('(U of )|( U$)','',. ) } %>%
-  { gsub('College','Col',. ) } %>%
-  { gsub('New York','NY',.)} %>%
-  { gsub('International','Intl',.) } %>%
-  { gsub('North[^ ]+','N',.)} %>%
-  { gsub('South[^ ]+','S',.)} %>%
-  { gsub('West[^ ]+','W',.)} %>%
-  { gsub('East[^ ]+','E',.)} %>%
-  { gsub(' U-','-',.)} %>%
-  { gsub('-Penn St ','',.)} %>%
-  { gsub(' Col *$','',.)} %>%
-  { gsub('-(Main)* Campus','',.)} %>%
-  { gsub('^PennSt([^-]+)$','Penn St-\\1',.)} %>%
-  { gsub(' and ','&',.)} %>%
-  { gsub('Agricultural & Mechanical','A&M',.)}
-
-st_abb <- state.abb %>% setNames( state.name )
-for( st_nm in names(st_abb) ){
-  college_names %<>% { gsub(st_nm,st_abb[st_nm],.) }
+# Abbreviate names so they don't clutter the plots so much.
+shorten_names <- function( df ){
+  college_names <- df %$% 
+    College %>%
+    { gsub('^[0-9_]+','',. ) } %>%
+    { gsub('Northwestern University','NU',.) } %>%
+    { gsub('University of Notre Dame','Notre Dame U.',.) } %>%
+    { gsub('Cornell College','Cornell C',.) } %>%
+    { gsub('Cornell University','Cornell U',.) } %>%
+    { gsub('California','Cal',. ) } %>%
+    { gsub('Mass.+Inst.+Tech.+','MIT',. ) } %>%
+    { gsub('(Mass|Penn|Wash)[^ ]+ *','\\1',.) } %>%
+    { gsub('Polytechnic','Poly',. ) } %>%
+    { gsub('Institute of Tech[^ ]+','IT',. ) } %>%
+    { gsub('Tech.+Inst.+','Tech',. ) } %>%
+    { gsub('State','St',. ) } %>%
+    { gsub('University','U',. ) } %>%
+    { gsub('(U of )|( U$)','',. ) } %>%
+    { gsub('College','Col',. ) } %>%
+    { gsub('New York','NY',.)} %>%
+    { gsub('International','Intl',.) } %>%
+    { gsub('North[^ ]+','N',.)} %>%
+    { gsub('South[^ ]+','S',.)} %>%
+    { gsub('West[^ ]+','W',.)} %>%
+    { gsub('East[^ ]+','E',.)} %>%
+    { gsub(' U-','-',.)} %>%
+    { gsub('-Penn St ','',.)} %>%
+    { gsub(' Col *$','',.)} %>%
+    { gsub('-(Main)* Campus','',.)} %>%
+    { gsub('^PennSt([^-]+)$','Penn St-\\1',.)} %>%
+    { gsub(' and ','&',.)} %>%
+    { gsub('Agricultural & Mechanical','A&M',.)}
+  
+  st_abb <- state.abb %>% setNames( state.name )
+  for( st_nm in names(st_abb) ){
+    college_names %<>% { gsub(st_nm,st_abb[st_nm],.) }
+  }
+  return( college_names )
 }
+
+college_names <- shorten_names( glmdata_all )
+college_names_student <- shorten_names( DataSpec$student)
 
 categories <- { 
   mmat[,key_terms] %*% 
@@ -282,16 +350,25 @@ tsne_df_all <- tsne_all$Y %>%
 #   print()
 ```
 
-### Show Biplot for Structure Interpretaion
+### Show Biplot for Structure Interpretation
 
-we can overlay the feature dimensions on the college scatterplot in the 2-D t-SNE coordinate space.  This allows
-us to more easily interpret the structure we're seeing.  However, some of the interaction terms, in particular,
+We can overlay the feature dimensions on the college scatterplot in the 2-D t-SNE coordinate space.  This allows
+us to more easily interpret the structure we're seeing.  
+
+However, some of the interaction terms, in particular,
 are tricky to interpret because they have a positive value for a college if both of the features in the product
 making up the interaction have the same sign.  So it could be that the college has a disproportionately higher
-*or* lower number of students having the attributes of both of the corresponding features.
+*or* lower number of students having the attributes of *both* of the corresponding features.
+
+By plotting the College points sized by their Bayes factor on incomes greater than $110,000, we can see where the
+colleges lie that have disproportionately high/low proportions of high-income students.
 
 ```{r biplot1,fig.height=10,fig.width=11}
-f_mult <- max(sqrt(tsne_df_all$Y1^2 + tsne_df_all$Y2^2))/max(sqrt(tsne_coef_df_all$Y1[-1]^2 + tsne_coef_df_all$Y2[-1]^2))
+# scale factor for coefficients:
+f_mult <- 
+  max(sqrt(tsne_df_all$Y1^2 + tsne_df_all$Y2^2))/
+  max(sqrt(tsne_coef_df_all$Y1[-1]^2 + tsne_coef_df_all$Y2[-1]^2))
+
 y2_min <- -3.5
 tsne_coef_df_all %>% 
   mutate( 
@@ -303,6 +380,7 @@ tsne_coef_df_all %>%
   {
     ggplot(., aes( x = Y1, y = Y2 ) ) +
       geom_point( color = 'red', alpha = 0.1 ) +
+      # Labels for the coefficients
       geom_text( 
         aes( label = Coefficient), 
         color = 'red',
@@ -310,6 +388,7 @@ tsne_coef_df_all %>%
         size = 3, 
         check_overlap = TRUE 
       ) + 
+      # Rays on the coefficients
       geom_segment(
         inherit.aes = FALSE,
         data = (.) %>% filter(mag>1),
@@ -318,6 +397,7 @@ tsne_coef_df_all %>%
         alpha = 0.3,
         arrow = arrow(length = unit(0.03, "npc"))
       ) + 
+      # Labels for the Colleges
       geom_text(
         inherit.aes = FALSE,
         data = tsne_df_all,
@@ -327,6 +407,7 @@ tsne_coef_df_all %>%
         size=3,
         check_overlap = TRUE
       )  +
+      # Points for the colleges
       geom_point( data=tsne_df_all, aes(x=Y1,y=Y2, size = BF_Income_gt110K ), color='blue',alpha=0.1) +
       ggtitle( "t-SNE Biplot" , subtitle = "(blue = college, red = feature)") +
       theme( text = element_text( face = 'bold' ) ) #+
@@ -335,56 +416,6 @@ tsne_coef_df_all %>%
   } %>%
   print()
 ```
-
-```{r notables}
-select_colleges <- c(
-  '^OH St', '^MI-Ann Arbor', '^Purdue$', '^NU$',
-  'Harvard', 'Yale', 'Princeton','^Penn$','^Cornell U\\.$','^Brown$',
-  '^Howard$','Tuskegee','Hampton','Morehouse','Grambling','Bethune-Cookman',
-  'Stanford','Johns Hopkins','Duke','Vanderbilt','Rice','Wash.+St Louis',
-  'Notre Dame U\\.','^Pomona$','Harvey Mudd','Swarthmore',
-  'MIT','Cal *IT'
-)
-tsne_select <- tsne_df_all %>% 
-  slice( sapply( select_colleges, function(nm_regex) grep(nm_regex,(.)$College) ) ) %$%
-  set_rownames(as.matrix(select(.,Y1,Y2)),College) %>% 
-  round(1)
-
-```
-Here are the t-SNE 2-D coordinates for some notable universities:
-
-+   **Big 10**
-    +  Ohio State: `r tsne_select[1,]`
-    +  Michigan:   `r tsne_select[2,]`
-    +  Purdue:   `r tsne_select[3,]`
-    +  Northwestern:   `r tsne_select[4,]`
-+   **Ivy League**
-    +  Harvard:   `r tsne_select[5,]`
-    +  Yale:   `r tsne_select[6,]`
-    +  Princeton:   `r tsne_select[7,]`
-    +  Penn:   `r tsne_select[8,]`
-    +  Cornell:   `r tsne_select[9,]`
-    +  Brown:   `r tsne_select[10,]`
-+   **HBCUs**
-    +  Howard:   `r tsne_select[11,]`
-    +  Tuskegee:   `r tsne_select[12,]`
-    +  Hampton Institute:   `r tsne_select[13,]`
-    +  Morehouse:   `r tsne_select[14,]`
-    +  Grambling:   `r tsne_select[15,]`
-    +  Bethune-Cookman:   `r tsne_select[16,]`
-+   **Others**
-    +  Stanford:   `r tsne_select[17,]`
-    +  Johns Hopkins:   `r tsne_select[18,]`
-    +  Duke:   `r tsne_select[19,]`
-    +  Vanderbilt:   `r tsne_select[20,]`
-    +  Rice:   `r tsne_select[21,]`
-    +  Washington U.-St. Louis:   `r tsne_select[22,]`
-    +  Notre Dame:   `r tsne_select[23,]`
-    +  Pomona:   `r tsne_select[24,]`
-    +  Harvey Mudd:   `r tsne_select[25,]`
-    +  Swarthmore:   `r tsne_select[26,]`
-    +  MIT:   `r tsne_select[27,]`
-    +  CalTech:   `r tsne_select[28,]`
 
 
 ### Perform Hierarchical Clustering
@@ -529,20 +560,107 @@ tsne_modified %>%
 We do find some structure in the plot. And, the rotation of the axis to put Harvard University at the
 top-center helps us to interpret the axes and give meaning to that structure. 
 
-### Notable clusters
+### Notable Colleges
 
 Clusters are colored with repeating colors and marked with repeating symbols, reflecting a limit
 of **ggplot2**. But each cluster should have an unique color-symbol combination.
 
-+   **Ivy Leagues** (orange pluses @ {0,3})
-+   **Big Publics (Land-Grants)** (lavender asterisks @ {-2,1.5})
-    +   **Cal-State System**
-+   **HCBU: haves & have-nots** (gold triangles @ {-2.5,-2})
-+   **Techies** (Orange dots @ {3.3,-1.7})
-+   **Artsies** (Green dpts @ {2,-3.5})
-+   **Religious** (green boxed X's @ {2.5,0})
-+   **Back-to-Schools & Late-Bloomers** (green pluses @ {-1,-1})
-    (>24yrs-old, veterans)
+Here are the t-SNE 2-D coordinates for some notable universities:
+
+```{r notables}
+select_colleges <- c(
+  '^OH St', '^MI-Ann Arbor', '^Purdue$', '^NU$','Harvard',
+  'Yale', 'Princeton','^Penn$','^Cornell$','^Brown$',
+  '^Howard$','Tuskegee','Hampton','Morehouse','Grambling',
+  'Bethune-Cookman','Stanford','Johns Hopkins','Duke','Vanderbilt',
+  'Rice','Wash.+St Louis','Notre Dame U\\.','^Pomona$','Harvey Mudd',
+  'Swarthmore','MIT','Cal *IT','WI-Madison','IN-Bloomington',
+  'Dartmouth',"Otis Col of Art&Design","San Francisco Art Institute",
+  "Watkins Col of Art Design & Film","Rose-Hulman IT",
+  "Worcester Poly Institute","GA IT Campus","Davidson"
+)
+
+names( select_colleges ) <- 
+  c(
+    "Ohio State","Michigan","Purdue","Northwestern",
+    "Harvard","Yale","Princeton","Penn","Cornell","Brown",
+    "Howard","Tuskegee","Hampton Inst","Morehouse","Grambling","Bethune-Cookman",
+    "Stanford","Johns Hopkins","Duke","Vanderbilt","Rice","Wash.U.-St.L.",
+    "Notre Dame","Pomona","Harvey Mudd","Swarthmore",
+    "MIT","CalTech","Wisconsin","Indiana","Dartmouth",
+    "Otis Col of Art&Design","San Francisco Art Institute","Watkins Col of Art Design & Film",
+    "Rose-Hulman IT","Worcester Poly Institute","Georgia Tech","Davidson"
+  )
+
+rowid_select <- sapply( select_colleges, function(nm_regex) grep(nm_regex,tsne_df_all$College) )
+
+sat_ugds_select <- DataSpec$student %>% 
+  slice( sapply( select_colleges, function(nm_regex) grep(nm_regex,college_names_student) ) ) %>%
+  dplyr::select(1:2,UGDS,SAT_AVG,pctDisc1,pctDisc2,C150_4_POOLED_SUPP,CDR3,median_hh_inc_2005,pell_ever_2005,PAR_ED_PCT_1STGEN) %>%
+  mutate(
+    UGDS = prettyNum( UGDS, big.mark = "," ),
+    SAT_AVG = round(SAT_AVG),
+    median_hh_inc_2005 = prettyNum(100*round(median_hh_inc_2005/100),big.mark=","),
+    pctDisc_top2 = round(pctDisc1+pctDisc2),
+    cluster = cluster_id_all[rowid_select]
+  ) %>%
+  dplyr::select(1:2,pctDisc_top2,everything(),-pctDisc1,-pctDisc2) %>%
+  left_join( 
+    DataSpec$studentBF %>% 
+      dplyr::select(unitID,BF_discBreadth,BF_SAT_gt1400,BF_not1stgen,BF_fsend_5_2005,BF_CDR3),
+    by = "unitID"
+  )
+
+tsne_select <- tsne_df_all %>% 
+  slice( rowid_select ) %$%
+  set_rownames(as.matrix(select(.,Y1,Y2)),College) %>% 
+  round(1)
+
+```
+
+
+
+|     Group      |     College     |  Y1 | Y2 |  SAT avg. | Cluster |
+|---------------:|----------------:|----:|:---|----------:|--------:|
+| **Ivy League** | Harvard         | `r tsne_select[ 5,1]` | `r tsne_select[ 5,2]` | `r sat_ugds_select$SAT_AVG[ 5]` | `r sat_ugds_select$cluster[ 5]` |
+|                | Yale            | `r tsne_select[ 6,1]` | `r tsne_select[ 6,2]` | `r sat_ugds_select$SAT_AVG[ 6]` | `r sat_ugds_select$cluster[ 6]` |
+|                | Penn            | `r tsne_select[ 8,1]` | `r tsne_select[ 8,2]` | `r sat_ugds_select$SAT_AVG[ 8]` | `r sat_ugds_select$cluster[ 8]` |
+|                | Princeton       | `r tsne_select[ 7,1]` | `r tsne_select[ 7,2]` | `r sat_ugds_select$SAT_AVG[ 7]` | `r sat_ugds_select$cluster[ 7]` |
+|                | Dartmouth       | `r tsne_select[31,1]` | `r tsne_select[31,2]` | `r sat_ugds_select$SAT_AVG[31]` | `r sat_ugds_select$cluster[31]` |
+|                | Brown           | `r tsne_select[10,1]` | `r tsne_select[10,2]` | `r sat_ugds_select$SAT_AVG[10]` | `r sat_ugds_select$cluster[10]` |
+|                | Cornell         | `r tsne_select[ 9,1]` | `r tsne_select[ 9,2]` | `r sat_ugds_select$SAT_AVG[ 9]` | `r sat_ugds_select$cluster[ 9]` |
+|   **Big 10**   | Ohio State      | `r tsne_select[ 1,1]` | `r tsne_select[ 1,2]` | `r sat_ugds_select$SAT_AVG[ 1]` | `r sat_ugds_select$cluster[ 1]` |
+|                | Wisconsin       | `r tsne_select[29,1]` | `r tsne_select[29,2]` | `r sat_ugds_select$SAT_AVG[29]` | `r sat_ugds_select$cluster[29]` |
+|                | Purdue          | `r tsne_select[ 3,1]` | `r tsne_select[ 3,2]` | `r sat_ugds_select$SAT_AVG[ 3]` | `r sat_ugds_select$cluster[ 3]` |
+|                | Indiana         | `r tsne_select[30,1]` | `r tsne_select[30,2]` | `r sat_ugds_select$SAT_AVG[30]` | `r sat_ugds_select$cluster[30]` |
+|                | Michigan        | `r tsne_select[ 2,1]` | `r tsne_select[ 2,2]` | `r sat_ugds_select$SAT_AVG[ 2]` | `r sat_ugds_select$cluster[ 2]` |
+|                | Northwestern    | `r tsne_select[ 4,1]` | `r tsne_select[ 4,2]` | `r sat_ugds_select$SAT_AVG[ 4]` | `r sat_ugds_select$cluster[ 4]` |
+|   **HBCUs**    | Howard          | `r tsne_select[11,1]` | `r tsne_select[11,2]` | `r sat_ugds_select$SAT_AVG[11]` | `r sat_ugds_select$cluster[11]` |
+|                | Tuskegee        | `r tsne_select[12,1]` | `r tsne_select[12,2]` | `r sat_ugds_select$SAT_AVG[12]` | `r sat_ugds_select$cluster[12]` |
+|                | Hampton Inst    | `r tsne_select[13,1]` | `r tsne_select[13,2]` | `r sat_ugds_select$SAT_AVG[13]` | `r sat_ugds_select$cluster[13]` |
+|                | Morehouse       | `r tsne_select[14,1]` | `r tsne_select[14,2]` | `r sat_ugds_select$SAT_AVG[14]` | `r sat_ugds_select$cluster[14]` |
+|                | Grambling       | `r tsne_select[15,1]` | `r tsne_select[15,2]` | `r sat_ugds_select$SAT_AVG[15]` | `r sat_ugds_select$cluster[15]` |
+|                | Bethune-Cookman | `r tsne_select[16,1]` | `r tsne_select[16,2]` | `r sat_ugds_select$SAT_AVG[16]` | `r sat_ugds_select$cluster[16]` |
+| **Arts Specialty** | SF Art Inst     | `r tsne_select[33,1]` | `r tsne_select[33,2]` | `r sat_ugds_select$SAT_AVG[33]` | `r sat_ugds_select$cluster[33]` |
+|                    | Otis C Art&Des  | `r tsne_select[32,1]` | `r tsne_select[32,2]` | `r sat_ugds_select$SAT_AVG[32]` | `r sat_ugds_select$cluster[32]` |
+|                    | Watkins Art,Des,Film  | `r tsne_select[34,1]` | `r tsne_select[34,2]` | `r sat_ugds_select$SAT_AVG[34]` | `r sat_ugds_select$cluster[34]` |
+| **Tech Specialty** | Rose-Hullman    | `r tsne_select[35,1]` | `r tsne_select[35,2]` | `r sat_ugds_select$SAT_AVG[35]` | `r sat_ugds_select$cluster[35]` |
+|                    | Georgia Tech    | `r tsne_select[37,1]` | `r tsne_select[37,2]` | `r sat_ugds_select$SAT_AVG[37]` | `r sat_ugds_select$cluster[37]` |
+|                    | WPI             | `r tsne_select[36,1]` | `r tsne_select[36,2]` | `r sat_ugds_select$SAT_AVG[36]` | `r sat_ugds_select$cluster[36]` |
+|   **Others**       | Stanford        | `r tsne_select[17,1]` | `r tsne_select[17,2]` | `r sat_ugds_select$SAT_AVG[17]` | `r sat_ugds_select$cluster[17]` |
+|                    | MIT             | `r tsne_select[27,1]` | `r tsne_select[27,2]` | `r sat_ugds_select$SAT_AVG[27]` | `r sat_ugds_select$cluster[27]` |
+|                    | CalTech         | `r tsne_select[28,1]` | `r tsne_select[28,2]` | `r sat_ugds_select$SAT_AVG[28]` | `r sat_ugds_select$cluster[28]` |
+|                    | Johns Hopkins   | `r tsne_select[18,1]` | `r tsne_select[18,2]` | `r sat_ugds_select$SAT_AVG[18]` | `r sat_ugds_select$cluster[18]` |
+|                    | Duke            | `r tsne_select[19,1]` | `r tsne_select[19,2]` | `r sat_ugds_select$SAT_AVG[19]` | `r sat_ugds_select$cluster[19]` |
+|                    | Vanderbilt      | `r tsne_select[20,1]` | `r tsne_select[20,2]` | `r sat_ugds_select$SAT_AVG[20]` | `r sat_ugds_select$cluster[20]` |
+|                    | Rice            | `r tsne_select[21,1]` | `r tsne_select[21,2]` | `r sat_ugds_select$SAT_AVG[21]` | `r sat_ugds_select$cluster[21]` |
+|                    | Wash.U.-St.L.   | `r tsne_select[22,1]` | `r tsne_select[22,2]` | `r sat_ugds_select$SAT_AVG[22]` | `r sat_ugds_select$cluster[22]` |
+|                    | Notre Dame      | `r tsne_select[23,1]` | `r tsne_select[23,2]` | `r sat_ugds_select$SAT_AVG[23]` | `r sat_ugds_select$cluster[23]` |
+|                    | Pomona          | `r tsne_select[24,1]` | `r tsne_select[24,2]` | `r sat_ugds_select$SAT_AVG[24]` | `r sat_ugds_select$cluster[24]` |
+|                    | Harvey Mudd     | `r tsne_select[25,1]` | `r tsne_select[25,2]` | `r sat_ugds_select$SAT_AVG[25]` | `r sat_ugds_select$cluster[25]` |
+|                    | Swarthmore      | `r tsne_select[26,1]` | `r tsne_select[26,2]` | `r sat_ugds_select$SAT_AVG[26]` | `r sat_ugds_select$cluster[26]` |
+|                    | Davidson        | `r tsne_select[38,1]` | `r tsne_select[38,2]` | `r sat_ugds_select$SAT_AVG[38]` | `r sat_ugds_select$cluster[38]` |
+
 
 
 ### Interpretation of Quadrants
