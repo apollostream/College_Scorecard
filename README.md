@@ -1,5 +1,10 @@
 # College_Scorecard Project 
-R Markdown notebooks with analysis of the U.S. Dept. of Education College Scorecard database
+R Markdown notebooks with analysis of the U.S. Dept. of Education College Scorecard database.
+
+You'll need to download the SQLITE version of the College Scorecard database from Kaggle:  
++  [database.sqlite](https://www.kaggle.com/kaggle/college-scorecard/downloads/database.sqlite)  
+
+Place the databse in your `../input` folder.  And place each of these scripts in your `../working` folder, which you'll set as your working directory using the R `setwd(...)` function. (I.e., `input` and `working` should be sibling folders residing in the same folder.)
 
 # Kaggle Script: Part 1  
 
