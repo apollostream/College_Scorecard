@@ -1,0 +1,1430 @@
+---
+title: "Which College is Best for You?"
+author: "Michael L. Thompson"
+date: "January 6, 2016"
+output:
+  html_document:
+    toc: yes
+  pdf_document:
+    toc: yes
+---
+# Introduction
+The [US College Scorecard dataset](<https://collegescorecard.ed.gov>)
+provides everyday folks, like myself, access to a rich source of US college
+information.  Yet, it's quite a challenge making sense out of such a
+sprawling dataset.  And even moreso to make sense out of it in a way that
+captures the specific context of a student's interest in determining which
+colleges are good candidates to attend or not.
+
+Before jumping into the analysis, I'd like to acknowledge those folks who
+generously shared their scripts on [Kaggle.com](<https://www.kaggle.com>)
+from which I learned -- and outright copied -- code snips to get this done. 
+In particular, the code provided by Ben Hamner on using package 'RSQLite' and
+by Tad Dallas on using package 'leaflet' for map plotting. Thank you!!!
+
+## Comments:
+***ALSO:*** To see the payoff, go straight to the ***Sensitivity Analysis*** section. 
+
+My intent was to render the R script as a PDF-format notebook using 
+RStudio's File-->Compile Notebook... menu command. But it was just taking too long 
+for me to get all the formatting of plots, lists and tables right -- so I bailed!
+
+The R script version runs fine when sourced at the R console or in
+RStudio. In fact, that's the only way I could get the `leaflet` package's
+interactive mapping to display -- until I changed `print(map)` to just plain `map`.
+
+Any help in cleaning up the formatting would be much appreciated.
+
+# Objective
+I set out to build a decision analysis tool that would be useful to an
+individual, like me, for judging the suitability of colleges specifically
+attuned to my criteria.  The analysis is based upon a model that combines the
+US College Scorecard data and my personal insights -- i.e., domain expertise
+-- into something useful for the following:
+
+1.  Estimating what specific type student is attracted to each college; 
+2.  Estimating what specific types of student are most likely to thrive at each college; and 
+3.  Predicting whether a student with a specific profile of interests & character traits would thrive at a specific college or not.
+
+This is still but a preliminary proof-of-concept level of analysis to
+illustrate the possibilities with this framework. Ideally, folks will see
+this, revise, complete and extend it.
+
+# Modeling Plan
+My modeling plan looks like this:
+
+1. Explore the dataset with unsupervised learning and data visualization to understand some of the underlying structure of the data.
++    a) Define contexts describing (i) College Experience, (ii) Post-College Professional Success, (iii) Post-College Life Satisfaction in terms of sets of variables in the Scorecard dataset related to salient aspects of each context (e.g., College Experience = f(student origins, student demographics, student performance, college environ/community/campus experience, college academic rigor); and noting that the different contexts may share subsets of variables (e.g. Post-College Life Satisfaction = f(degree achievement, post-college success, earnings vs. debt burden & debt repayment)?
++    b) Predict what colleges cluster together in what Contexts?
+2. Create archetypical behavioral characteristics of students and map those behavioral traits to variables in the Scorecard dataset.
+3. Build probabilistic choice models that estimate which colleges maximizes a specific student's utility according to the
+students personalize valuation coefficients (i.e. partworths).
+4. Validate (with personal experience/anecdotal evidence) whether or not specific profiles predicted to thrive at specific colleges in each context make sense or not.
+
+# Data Pre-Processing & Exploration
+I've done a ton of pre-processing, plotting and data transformations, even
+unsupervised learning, to explore the data.  I'm going to skip the
+presentation of those exploration pieces here but instead just show the data
+winnowing and wrangling I did in preparation for modeling.
+
+Let's start by loading the packages, downloading & installing them if necessary:
+```{r}
+library('RSQLite')   # for SQLite manipulation of database
+library('magrittr')  # for piping with infix %>%, %<>%, %T>% (for cool, sophistication effect)
+library('tidyr')     # for reshaping data (e.g., 'gather')
+library('dplyr')     # for data wrangling (e.g., 'filter', 'select', 'summarize', 'inner_join')
+library('ggplot2')   # for best-in-class visualization
+library('gridExtra') # for grid layout of ggplots
+#  library('poLCA')     # for estimation of latent classes underlying categorical variables
+library('bnlearn')   # for learning BBN from datasets, and also provides function "discretize"
+#  library('gRain')     # for Bayesian belief network (BBN) inference engine
+library('leaflet')   # for mapping of the top schools for each student
+library('htmltools') # for assistance with leaflet
+library('RColorBrewer') # for color palette management
+```
+
+After orienting myself a little with the [data documentation](https://collegescorecard.ed.gov/data/documentation/),..., I
+started by borrowing code from [Ben Hamner's "Exploring the US College Scorecard Data" script](https://www.kaggle.com/benhamner/us-dept-of-education-college-scorecard/exploring-the-us-college-scorecard-data):
+
+```{r}
+db <- dbConnect(dbDriver("SQLite"), "../input/database.sqlite")
+# This stops SQLite from writing temp files to disk, which use all the available space
+dbGetQuery(db, "PRAGMA temp_store=2;") 
+
+tables <- dbGetQuery(db, "SELECT Name FROM sqlite_master WHERE type='table'")
+colnames(tables) <- c("Name")
+tables %<>%
+  rowwise() %>%
+  mutate(RowCount=dbGetQuery(db, paste0("SELECT COUNT(Id) RowCount FROM ", Name))$RowCount[1])
+show(tables)
+
+allFields <- dbListFields(db,tables$Name[1])
+show(length(allFields))
+```
+I also downloaded the data dictionary and relied upon it heavily to
+understand the database contents. Here I read it in and "revise" it by
+getting rid of the strange characters that were meant to be apostrophe's and,
+more importantly, filled in the blank cells of its tabular format so it shows
+up like a standard data.frame useful for automated processing:
+```{r}
+if(!exists("dataDict")) {
+  if(!file.exists("CollegeScorecardDataDictionary-09-12-2015_REVISED.csv")) {
+    # JUST ASSUMES THAT FILE "CollegeScorecardDataDictionary-09-12-2015.csv"
+    # DOES EXIST IN THE WORKING DIRECTORY:
+    dataDict  <- read.csv(file="../input/CollegeScorecardDataDictionary-09-12-2015.csv",
+                          stringsAsFactors = FALSE)
+    show(head(dataDict))
+    str(dataDict)
+    
+    show(setdiff(allFields,dataDict$VARIABLE.NAME))
+    show(setdiff(dataDict$VARIABLE.NAME,allFields))
+    
+    dataDict <- dataDict %>% mutate(LABEL=gsub("^(.*)â€™(.*)$","\\1'\\2",LABEL))
+    # Fill-down
+    fillDown <- function(df=dataDict,fillCols=c(1:5,8)) {
+      nr   <- nrow(dataDict)
+      irow <- 1
+      while(irow < nr){
+        while(df$NAME.OF.DATA.ELEMENT[irow] == ""){
+          df[irow,fillCols] <- df[irow-1,fillCols]
+          irow <- irow + 1
+        }
+        irow <- irow + 1
+      }
+      return(df)
+    }
+    dataDict <- dataDict %>% fillDown(c(1:5,8))
+    #    write.csv(dataDict,file="CollegeScorecardDataDictionary-09-08-2015_REVISED.csv",
+    #              row.names = FALSE,na="")
+  } else {
+    dataDict <- read.csv(file="../input/CollegeScorecardDataDictionary-09-12-2015_REVISED.csv",
+                         stringsAsFactors = FALSE)
+  }
+}
+print(head(dataDict))
+print(dataDict %>% tbl_df)
+```
+# Probabilistic Discrete Choice Modeling
+A key concept in the probabilistic Bayesian modeling framework I've chosen is to represent each college by a set of variables quantifying the types of students who populate their campus. This requires turning as many of the provided variables as possible into conditional probability distributions such as P(student-income > x | college = school-of-interest). From these conditional probabilities, 
+
+I then computed [Bayes Factors](http://bayesfactor.blogspot.com/2014/02/the-bayesfactor-package-this-blog-is.html): log10(P(student-income > x | college = school-of-interest)/P(student-income > x | college != school-of-interest)) = Posterior-Odds(college = school-of-interest | student-income>x)/Prior-Odds(college = school-of-interest).
+
+These Bayes factors then serve as the covariates in the linear utility function of the discrete choice model: u(school-of-interest | student) = beta(student) * Bayes-factors(school-of-interest).  (See Nobel Laureate for Economics [Daniel McFadden's](https://en.wikipedia.org/wiki/Daniel_McFadden) contributions in discrete choice modeling.)
+
+Then the student can just rank-order the colleges by their utilities u(school-of-interest | student). 
+
+Now, there are many alternatives to this framework.  I chose this one because of its flexibility and my experience using such models. And even though I don't do a rigorous data-estimated hierarchical model using tools such as Stan through package rstan, the promise of the framework is hinted at in the flexibility of the subsequent analyses.
+
+Let's get on with the work!
+
+Grab the requisite datasets: Used years 2005 (for the Treasury data on students' originating zip codes) and 2013.
+```{r}
+# This groups the disciplines (degrees) into reasonably similar sets.
+#discgrp <- read.csv("discgrp.csv", stringsAsFactors=FALSE)
+discgrp <- data_frame(LABEL=c("Agriculture, Agriculture Operations, and Related Sciences","Natural Resources and Conservation",
+                              "Architecture and Related Services","Area, Ethnic, Cultural, Gender, and Group Studies",
+                              "Communication, Journalism, and Related Programs","Communications Technologies/Technicians and Support Services",
+                              "Computer and Information Sciences and Support Services","Personal and Culinary Services",
+                              "Education","Engineering","Engineering Technologies and Engineering-Related Fields",
+                              "Foreign Languages, Literatures, and Linguistics","Family and Consumer Sciences/Human Sciences",
+                              "Legal Professions and Studies","English Language and Literature/Letters",
+                              "Liberal Arts and Sciences, General Studies and Humanities","Library Science","Biological and Biomedical Sciences",
+                              "Mathematics and Statistics","Military Technologies and Applied Sciences","Multi/Interdisciplinary Studies",
+                              "Parks, Recreation, Leisure, and Fitness Studies","Philosophy and Religious Studies","Theology and Religious Vocations",
+                              "Physical Sciences","Science Technologies/Technicians","Psychology",
+                              "Homeland Security, Law Enforcement, Firefighting and Related Protective Services",
+                              "Public Administration and Social Service Professions","Social Sciences","Construction Trades",
+                              "Mechanic and Repair Technologies/Technicians","Precision Production","Transportation and Materials Moving",
+                              "Visual and Performing Arts","Health Professions and Related Programs",
+                              "Business, Management, Marketing, and Related Support Services","History"),
+                      discrp=c(2,4,2,5,6,4,1,4,5,1,1,5,5,7,5,5,5,2,1,4,5,4,5,5,2,3,3,4,3,3,4,4,4,4,6,2,7,5),
+                      VARIABLE.NAME=c("PCIP01","PCIP03","PCIP04","PCIP05","PCIP09","PCIP10","PCIP11","PCIP12","PCIP13",
+                                      "PCIP14","PCIP15","PCIP16","PCIP19","PCIP22","PCIP23","PCIP24","PCIP25","PCIP26",
+                                      "PCIP27","PCIP29","PCIP30","PCIP31","PCIP38","PCIP39","PCIP40","PCIP41","PCIP42",
+                                      "PCIP43","PCIP44","PCIP45","PCIP46","PCIP47","PCIP48","PCIP49","PCIP50","PCIP51",
+                                      "PCIP52","PCIP54"))
+
+```
+
+Only deal with colleges having these traits:
+
+1. Public or Private non-profit
+   + Drops Private for-profit schools
+2. Currently Operating
+3. Fully accreditted
+4. Predominantly Bachelor's degree granting
+5. Within the 50 states of the U.S.A.
+6. Not a distance-only college
+7. Not a theological school
+
+Now the challenge is to match the available database columns to the criteria I wish to calculate.
+```{r}
+fieldNames <-
+  c(
+    'UGDS','UGDS_WHITE','UGDS_BLACK','UGDS_HISP','UGDS_ASIAN','UGDS_AIAN','UGDS_NHPI',
+    'UGDS_2MOR','UGDS_NRA','UGDS_UNKN',"UG25abv","INC_PCT_LO","DEP_STAT_PCT_IND","DEP_INC_PCT_LO","IND_INC_PCT_LO",
+    "DEP_INC_PCT_M1","DEP_INC_PCT_M2","DEP_INC_PCT_H1","IND_INC_PCT_M1","IND_INC_PCT_M2","IND_INC_PCT_H1","IND_INC_PCT_H2",
+    "DEP_INC_PCT_H2","PAR_ED_PCT_1STGEN","pct_white","pct_black","pct_asian","pct_hispanic","pct_ba","pct_grad_prof",
+    "pct_born_us","median_hh_inc","poverty_rate","unemp_rate","ln_median_hh_inc","pell_ever","female","fsend_1","fsend_2",
+    "fsend_3","fsend_4","fsend_5","INC_PCT_LO","INC_PCT_M1","INC_PCT_M2","INC_PCT_H1","INC_PCT_H2","LATITUDE",
+    "LONGITUDE","ZIP","STABBR","region","LOCALE","CCSIZSET","DISTANCEONLY","RELAFFIL","CURROPER","NPT4_PUB",
+    "NPT4_PRIV","NPT41_PUB","NPT42_PUB","NPT43_PUB","NPT44_PUB","NPT45_PUB","NPT41_PRIV","NPT42_PRIV","NPT43_PRIV",
+    "NPT44_PRIV","NPT45_PRIV","TUITIONFEE_IN","TUITIONFEE_OUT","PCTPELL","ADM_RATE","RET_FT4","SATVR25","SATVR75",
+    "SATMT25","SATMT75","SATWR25","SATWR75","SATVRMID","SATMTMID","SATWRMID","ACTCM25","ACTCM75","ACTEN25","ACTEN75",
+    "ACTMT25","ACTMT75","ACTWR25","ACTWR75","ACTCMMID","ACTENMID","ACTMTMID","ACTWRMID","SAT_AVG","SAT_AVG_ALL",
+    "PCIP01","PCIP03","PCIP04","PCIP05","PCIP09","PCIP10","PCIP11","PCIP12",
+    "PCIP13","PCIP14","PCIP15","PCIP16","PCIP19","PCIP22","PCIP23","PCIP24","PCIP25","PCIP26","PCIP27","PCIP29","PCIP30",
+    "PCIP31","PCIP38","PCIP39","PCIP40","PCIP41","PCIP42","PCIP43","PCIP44","PCIP45","PCIP46","PCIP47","PCIP48","PCIP49",
+    "PCIP50","PCIP51","PCIP52","PCIP54","C150_4_WHITE","C150_4_BLACK","C150_4_HISP","C150_4_ASIAN","ENRL_ORIG_YR2_RT",
+    "LO_INC_ENRL_ORIG_YR2_RT","MD_INC_ENRL_ORIG_YR2_RT","HI_INC_ENRL_ORIG_YR2_RT","DEP_ENRL_ORIG_YR2_RT","IND_ENRL_ORIG_YR2_RT",
+    "FEMALE_ENRL_ORIG_YR2_RT","MALE_ENRL_ORIG_YR2_RT","PELL_ENRL_ORIG_YR2_RT","NOPELL_ENRL_ORIG_YR2_RT","LOAN_ENRL_ORIG_YR2_RT",
+    "NOLOAN_ENRL_ORIG_YR2_RT","FIRSTGEN_ENRL_ORIG_YR2_RT","NOT1STGEN_ENRL_ORIG_YR2_RT","ENRL_ORIG_YR3_RT","LO_INC_ENRL_ORIG_YR3_RT",
+    "MD_INC_ENRL_ORIG_YR3_RT","HI_INC_ENRL_ORIG_YR3_RT","DEP_ENRL_ORIG_YR3_RT","IND_ENRL_ORIG_YR3_RT","FEMALE_ENRL_ORIG_YR3_RT",
+    "MALE_ENRL_ORIG_YR3_RT","PELL_ENRL_ORIG_YR3_RT","NOPELL_ENRL_ORIG_YR3_RT","LOAN_ENRL_ORIG_YR3_RT","NOLOAN_ENRL_ORIG_YR3_RT",
+    "FIRSTGEN_ENRL_ORIG_YR3_RT","NOT1STGEN_ENRL_ORIG_YR3_RT","ENRL_ORIG_YR4_RT","LO_INC_ENRL_ORIG_YR4_RT","MD_INC_ENRL_ORIG_YR4_RT",
+    "HI_INC_ENRL_ORIG_YR4_RT","DEP_ENRL_ORIG_YR4_RT","IND_ENRL_ORIG_YR4_RT","FEMALE_ENRL_ORIG_YR4_RT","MALE_ENRL_ORIG_YR4_RT",
+    "PELL_ENRL_ORIG_YR4_RT","NOPELL_ENRL_ORIG_YR4_RT","LOAN_ENRL_ORIG_YR4_RT","NOLOAN_ENRL_ORIG_YR4_RT","FIRSTGEN_ENRL_ORIG_YR4_RT",
+    "NOT1STGEN_ENRL_ORIG_YR4_RT","ENRL_ORIG_YR6_RT","LO_INC_ENRL_ORIG_YR6_RT","MD_INC_ENRL_ORIG_YR6_RT","HI_INC_ENRL_ORIG_YR6_RT",
+    "DEP_ENRL_ORIG_YR6_RT","IND_ENRL_ORIG_YR6_RT","FEMALE_ENRL_ORIG_YR6_RT","MALE_ENRL_ORIG_YR6_RT","PELL_ENRL_ORIG_YR6_RT",
+    "NOPELL_ENRL_ORIG_YR6_RT","LOAN_ENRL_ORIG_YR6_RT","NOLOAN_ENRL_ORIG_YR6_RT","FIRSTGEN_ENRL_ORIG_YR6_RT","NOT1STGEN_ENRL_ORIG_YR6_RT",
+    "ENRL_ORIG_YR8_RT","LO_INC_ENRL_ORIG_YR8_RT","MD_INC_ENRL_ORIG_YR8_RT","HI_INC_ENRL_ORIG_YR8_RT","DEP_ENRL_ORIG_YR8_RT",
+    "IND_ENRL_ORIG_YR8_RT","FEMALE_ENRL_ORIG_YR8_RT","MALE_ENRL_ORIG_YR8_RT","PELL_ENRL_ORIG_YR8_RT","NOPELL_ENRL_ORIG_YR8_RT",
+    "LOAN_ENRL_ORIG_YR8_RT","NOLOAN_ENRL_ORIG_YR8_RT","FIRSTGEN_ENRL_ORIG_YR8_RT","NOT1STGEN_ENRL_ORIG_YR8_RT","C150_4_POOLED_SUPP",
+    "PCTFLOAN","DEBT_MDN","GRAD_DEBT_MDN","WDRAW_DEBT_MDN","LO_INC_DEBT_MDN","MD_INC_DEBT_MDN","HI_INC_DEBT_MDN","DEP_DEBT_MDN",
+    "IND_DEBT_MDN","PELL_DEBT_MDN","NOPELL_DEBT_MDN","CUML_DEBT_N","CUML_DEBT_P90","CUML_DEBT_P75","CUML_DEBT_P25",
+    "CUML_DEBT_P10","loan_ever","DEBT_MDN_SUPP","GRAD_DEBT_MDN_SUPP","GRAD_DEBT_MDN10YR_SUPP","CDR2","CDR3","COMPL_RPY_1YR_RT",
+    "NONCOM_RPY_1YR_RT","LO_INC_RPY_1YR_RT","MD_INC_RPY_1YR_RT","HI_INC_RPY_1YR_RT","DEP_RPY_1YR_RT","IND_RPY_1YR_RT",
+    "PELL_RPY_1YR_RT","NOPELL_RPY_1YR_RT","FEMALE_RPY_1YR_RT","MALE_RPY_1YR_RT","FIRSTGEN_RPY_1YR_RT","NOTFIRSTGEN_RPY_1YR_RT",
+    "RPY_3YR_RT","COMPL_RPY_3YR_RT","NONCOM_RPY_3YR_RT","LO_INC_RPY_3YR_RT","MD_INC_RPY_3YR_RT","HI_INC_RPY_3YR_RT","DEP_RPY_3YR_RT",
+    "IND_RPY_3YR_RT","PELL_RPY_3YR_RT","NOPELL_RPY_3YR_RT","FEMALE_RPY_3YR_RT","MALE_RPY_3YR_RT","FIRSTGEN_RPY_3YR_RT",
+    "NOTFIRSTGEN_RPY_3YR_RT","RPY_5YR_RT","COMPL_RPY_5YR_RT","NONCOM_RPY_5YR_RT","LO_INC_RPY_5YR_RT","MD_INC_RPY_5YR_RT",
+    "HI_INC_RPY_5YR_RT","DEP_RPY_5YR_RT","IND_RPY_5YR_RT","PELL_RPY_5YR_RT","NOPELL_RPY_5YR_RT","FEMALE_RPY_5YR_RT",
+    "MALE_RPY_5YR_RT","FIRSTGEN_RPY_5YR_RT","NOTFIRSTGEN_RPY_5YR_RT","RPY_7YR_RT","COMPL_RPY_7YR_RT","NONCOM_RPY_7YR_RT",
+    "LO_INC_RPY_7YR_RT","MD_INC_RPY_7YR_RT","HI_INC_RPY_7YR_RT","DEP_RPY_7YR_RT","IND_RPY_7YR_RT","PELL_RPY_7YR_RT",
+    "NOPELL_RPY_7YR_RT","FEMALE_RPY_7YR_RT","MALE_RPY_7YR_RT","FIRSTGEN_RPY_7YR_RT","NOTFIRSTGEN_RPY_7YR_RT","count_ed",
+    "count_nwne_p6","count_wne_p6","mn_earn_wne_p6","md_earn_wne_p6","pct10_earn_wne_p6","pct25_earn_wne_p6",
+    "pct75_earn_wne_p6","pct90_earn_wne_p6","sd_earn_wne_p6","gt_25k_p6","mn_earn_wne_inc1_p6","mn_earn_wne_inc2_p6",
+    "mn_earn_wne_inc3_p6"
+  )
+# This dropped name set is part of the base query string...
+fieldNames <- setdiff(fieldNames,c('CITY','LONGITUDE','LATITUDE','ZIP','region','LOCALE','CURROPER')) 
+fieldNames <- grep('PCIP',fieldNames,value = TRUE,invert = TRUE) # drop the discipline fields; they're grabbed separately.
+
+# Upper case variables are from 2013 and lower case variables are from the Treasury dataset of 2005, except 'region'.
+# fromS10 <- grep('ENRL_ORIG',fieldNames)
+fromS11 <- which(fieldNames %in% grep('^[A-Z]|region',fieldNames))
+fromS05 <- setdiff(seq_along(fieldNames),fromS11)
+dfNames <- ifelse(grepl('^[A-Z]|region',fieldNames),fieldNames,paste(fieldNames,"2005",sep="_")) # put a '_2005' suffix on the Treasury variables.
+
+makeQuery <- function(year,fieldNames,dfNames) {
+  paste("SELECT UNITID unitID,
+        INSTNM College,
+        CONTROL CollegeType,
+        PREDDEG degree,
+        CURROPER currop,
+        DISTANCEONLY distance,
+        RELAFFIL relaffil,
+        CITY city,
+        LONGITUDE lon,
+        LATITUDE  lat,
+        ZIP zip,
+        st_fips state,
+        region region,
+        LOCALE locale,
+        CCBASIC ccbasic,
+        CCUGPROF ccugprof,
+        Year Year,",
+        paste(fieldNames,' ',dfNames,sep="",collapse = ","),
+        "FROM Scorecard 
+        WHERE Year=",year)
+}
+
+queryString2005 <- makeQuery(2005,fieldNames,dfNames)
+queryString2013 <- makeQuery(2013,fieldNames,dfNames)
+
+
+discNames <- gsub('^([A-Z][-a-z]+)[, and/]*([A-Z][a-z]+).*','\\1\\2',discgrp$LABEL)
+discgrp %<>% tbl_df %>% mutate(discName = discNames)
+queryStringDscplns <- makeQuery(2013,discgrp$VARIABLE.NAME,discNames)
+
+# Retrieve the data for 2005 because that is the latest with Treasury data on student families.
+student2005 <- dbGetQuery(db,queryString2005)
+# Retrieve the data for 2013 because that's the latest data.
+student2013 <- dbGetQuery(db,queryString2013)
+disciplines2013 <- dbGetQuery(db,queryStringDscplns)
+
+# Disconnect the database.
+dbDisconnect(db)
+
+# Join the years together.
+student2013 <- student2013[!sapply(student2013,function(x) all(is.na(x)))] %>% tbl_df
+student2005 <- student2005[!sapply(student2005,function(x) all(is.na(x)))] %>% tbl_df
+# student <- student2013 %>% tbl_df %>% 
+#   dplyr::select(-contains('_2005')) %>% 
+#   inner_join(student2005 %>% dplyr::select(unitID,contains('_2005')), by = "unitID")
+student <- student2013 %>% 
+  inner_join(student2005 %>% dplyr::select(unitID,contains('_2005')), by = "unitID")
+# Add the dominant disciplines
+discplns <- disciplines2013 %>% tbl_df %>%
+  filter(unitID %in% student$unitID) %>%
+  mutate(irow = seq_len(nrow(.))) %>%
+  gather(key=Discipline,value=Proportion,one_of(discNames)) %>%
+  group_by(irow) %>%
+  arrange(desc(Proportion)) %>%
+  summarize(
+    unitID   = first(unitID),
+    College  = first(College),
+    domDisc1 = first(Discipline),
+    pctDisc1 = 100*first(Proportion),
+    domDisc2 = nth(Discipline,n=2),
+    pctDisc2 = 100*nth(Proportion,n=2)
+  ) %>%
+  mutate(
+    isSpecialty = pctDisc1 > 70,
+    isTheological = grepl('Theolo|Relig',domDisc1) | grepl('Theolo|Relig',domDisc2)
+  )
+
+# CALLED THE MAIN DATA TABLE `student` BECAUSE ORIGINALLY ONLY CONTAINED
+# `student` CATEGORY OF DATA FIELDS. NOW THIS LEGACY NAME AWKWARDLY CONFUSES
+# THIS DATA TABLE OF UNIVERSITIES/COLLEGES WITH THE OTHER DATA OBJECTS
+# CONTAINING SPECIFIC STUDENT PROPERTIES -- SEE LATER...
+
+# Now add the disciplines as grouped
+student %<>% 
+  inner_join(discplns %>% dplyr::select(-College),by='unitID')
+
+usa.states.dc <- c("District of Columbia",state.name)
+student0 <- student
+```
+***NOTE:*** At this point the foundational data table is `student0`, which is further
+manipulated as `student`. This includes filtering out colleges we're not
+interested in. See the printouts below to get a sense of what data were kept.
+```{r}
+
+# Filter down to just the colleges meeting the following criteria:
+student  <- student0 %>% 
+  filter(CollegeType != 'Private for-profit',
+         currop      == 'Currently certified as operating',
+         distance    == 'Not distance-education only',
+         degree      == "Predominantly bachelor's-degree granting",
+         as.character(region)      != 'U.S. Service Schools',
+         !grepl('^Associate',ccbasic),
+         state %in% usa.states.dc,
+         !is.na(ccbasic),
+         !is.na(UGDS),
+         !is.na(pell_ever_2005),
+         !isTheological,
+         !is.na(mn_earn_wne_inc2_p6_2005))
+
+# Turn character columns into factors.
+student <- student %>% lapply(
+  function(x) 
+    if(is.character(x) | is.factor(x) | is.logical(x)) {
+      if('PrivacySuppressed' %in% x) {
+        tmp<-x;tmp[x=='PrivacySuppressed']<-NA;as.numeric(tmp)
+      } else {
+        factor(gsub("â€™","'",x))
+      }
+    } else as.numeric(x)) %>% 
+  as.data.frame %>% tbl_df
+
+# add a religious affiliation indicator variable:
+student %<>% 
+  mutate(relaffilFLAG=factor(ifelse(is.na(relaffil),
+                                    FALSE,
+                                    !grepl('^[Nn]ot ',as.character(relaffil)))))
+
+
+a<- student %>% dplyr::select(grep('^(SAT|ACT)',names(.))) %>%  apply(1,function(x) !all(is.na(x)))
+student %<>% mutate(stdzdtest=a)
+
+show(dim(student))
+#show(summary(student))
+
+```
+Drop all the Penn St. and U. of Pitt. schools except the main campus because
+same 2005 Treasury data entered in all rows for each, resp.
+```{r}
+stdttmp <- student %>% filter((College %in% c('Pennsylvania State University-Main Campus',
+                                              'University of Pittsburgh-Pittsburgh Campus')) |
+                                !(College %in% grep('Pennsylvania State University|University of Pittsburgh',
+                                                    College,value=TRUE)))
+show(setdiff(student$College,stdttmp$College))
+show(grep('Pennsylvania State University|University of Pittsburgh',stdttmp$College,value=TRUE))
+student <- stdttmp
+rm(stdttmp)
+student <- student[!sapply(student,function(x) length(which(is.na(x)))>1000)]
+# Drop schools without earnings data:
+student %>% filter(is.na(pct10_earn_wne_p6_2005) | pct10_earn_wne_p6_2005==0) %>% 
+  dplyr::select(unitID,College,UGDS,matches('pct.+earn')) %>% 
+  print(n=60)
+student %<>% 
+  filter(!is.na(pct10_earn_wne_p6_2005) & pct10_earn_wne_p6_2005>0) 
+
+#show(summary(student))
+```
+Most selective schools according to admissions rate:
+```{r}
+# Most selective schools according to admissions rate:
+# student %>% 
+#   filter(!is.na(ADM_RATE) & ADM_RATE<0.2 & UGDS>600) %>% 
+#   dplyr::select(unitID,College,UGDS,matches('SAT|ACT'),ADM_RATE) %>% 
+#   arrange(ADM_RATE) %>% 
+#   print(n=40)
+student %>% 
+  filter(!is.na(ADM_RATE) & ADM_RATE<0.2 & UGDS>600) %>% 
+  dplyr::select(unitID,College,UGDS,contains('Disc'),ADM_RATE,pell_ever_2005) %>% 
+  arrange(ADM_RATE) %>% 
+  print(n=40)
+#===================================================
+```
+
+## Building Conditional Probabilities & Bayes Factors
+What follows are code chunks to generate specific contextual data tables
+of conditional probabilities and Bayes factors for different aspects of the
+college experience for a student at each college, as was described above. 
+Note that I fudged the Bayes factors -- even after defining the functions to
+compute them properly. Also, I did a bit of exploration with poLCA, but
+commented it out. (Using ggplot2, it's easy to visually explore clustering
+solutions using 'small multiples' (i.e., facet_wrap). But not shown here....)
+
+### Ethnicity:
+```{r}
+ethnicity <- student %>% 
+  dplyr::select(unitID,College,contains("UGDS")) %>%
+  mutate(probSchool = UGDS/sum(UGDS),
+         totprob    = rowSums(as.matrix(.[4:ncol(.)])))
+ethnicity %>% print(n=20)
+```
+This computes P(E | not(H)) the conditional probability of evidence given the
+hypothesis is FALSE using inputs of cpH = P(E | H) probability of evidence
+given the hypothesis is TRUE and pH = P(H) the marginal (prior) probability
+of hypothesis being TRUE. But, in this case of almost 1500 schools, where "H"
+is school si, P(E|not(H)) is approximately P(E) = sum(P(E|H)*P(H);over H). 
+So, could skip this function and just use P(E).
+
+***IMPORTANT:*** I use log10 of the Bayes factors, which is a bit unusual,
+but I know powers of 10 better than powers of 2 or *e*.
+```{r}
+cpNotH <- function(cpH,pH){
+  pEH <- cpH * pH
+  pE  <- sum(pEH)
+  return((pE - pEH)/(1 - pH))
+}
+BFactor <- function(cpH,cpNotH,logFunc=log10){
+  x <- cpH / cpNotH
+  return(if(is.function(logFunc)) logFunc(x) else x)
+}
+makeCpNotH <- function(x) mapply(cpNotH,cpH=x,pH=ethnicity$probSchool)
+makeBF <- function(x) {x <- 1.0E-9 + x;log10(x/sum(x*ethnicity$probSchool,na.rm=TRUE))} # Approximate
+
+ethnicBF <- ethnicity %>% 
+  dplyr::select(contains("UGDS_")) %>% 
+  mutate_each(funs(makeBF)) %>% 
+  setNames(gsub("UGDS","BF",names(.))) %$%
+  bind_cols(ethnicity[1:2],.) %>%
+  mutate(BF_female_2005 = makeBF(student$female_2005))
+#=====================================================
+```
+### Income:
+```{r}
+income <- student %>% 
+  dplyr::select(unitID,College,UGDS,DEP_STAT_PCT_IND,contains("INC_PCT")) %>%
+  mutate(probSchool = UGDS/sum(UGDS),
+         totprob      = rowSums(as.matrix(.[c("INC_PCT_LO","INC_PCT_M1","INC_PCT_M2","INC_PCT_H1",
+                                              "INC_PCT_H2")])),
+         totprobdep   = rowSums(as.matrix(.[c("DEP_INC_PCT_LO","DEP_INC_PCT_M1","DEP_INC_PCT_M2",
+                                              "DEP_INC_PCT_H1","DEP_INC_PCT_H2")])),
+         totprobind   = rowSums(as.matrix(.[c("IND_INC_PCT_LO","IND_INC_PCT_M1","IND_INC_PCT_M2",
+                                              "IND_INC_PCT_H1","IND_INC_PCT_H2")])),
+         totprob2dep  = rowSums(as.matrix(.[c("DEP_INC_PCT_LO","DEP_INC_PCT_H2")])),
+         totprob2ind  = rowSums(as.matrix(.[c("IND_INC_PCT_LO","IND_INC_PCT_H2")])))
+income %>% print(n=20)
+
+# To avoid dropping many schools due to missing values will hold 7 variables
+# for income: DEP_STAT_PCT_IND, DEP_INC_PCT_LO, DEP_INC_PCT_H2 &
+# DEP_INC_GTLO_LTH2, IND_INC_PCT_LO, IND_INC_PCT_H2 & IND_INC_GTLO_LTH2; where
+# the x_INC_GTLO_LTH2 variables are 1 - x_INC_PCT_H2 - x_INC_PCT_LO; and the
+# sum of the latter 6 columns = 1. So must mutate the current IND_... columns
+# by multiplying by DEP_STAT_PCT_IND. An "x" is appended to the end of the
+# newly computed variable names.
+
+income %<>% mutate(probSchool = UGDS/sum(UGDS),
+                   DEP_STAT_PCT_INDx  = DEP_STAT_PCT_IND,
+                   DEP_STAT_PCT_DEPx  = 1 - DEP_STAT_PCT_INDx,
+                   DEP_INC_PCT_LOx    = DEP_INC_PCT_LO*DEP_STAT_PCT_DEPx,
+                   DEP_INC_PCT_HI2x   = DEP_INC_PCT_H2*DEP_STAT_PCT_DEPx,
+                   DEP_INC_GTLO_LTH2x = DEP_STAT_PCT_DEPx - DEP_INC_PCT_LOx - DEP_INC_PCT_HI2x,
+                   IND_INC_PCT_LOx    = IND_INC_PCT_LO*DEP_STAT_PCT_INDx,
+                   IND_INC_PCT_HI2x   = IND_INC_PCT_H2*DEP_STAT_PCT_INDx,
+                   IND_INC_GTLO_LTH2x = DEP_STAT_PCT_IND - IND_INC_PCT_LOx - IND_INC_PCT_HI2x,
+                   totprobx = DEP_INC_PCT_LOx + DEP_INC_PCT_HI2x + DEP_INC_GTLO_LTH2x + IND_INC_PCT_LOx + IND_INC_PCT_HI2x + IND_INC_GTLO_LTH2x) %>%
+  dplyr::select(unitID,College,UGDS,probSchool,matches("x$"))
+income %>% print(n=20)
+#income[income$College=='California Institute of Technology',
+#        c('IND_INC_PCT_LOx','IND_INC_PCT_HI2x','IND_INC_GTLO_LTH2x','totprobx')] <- c(0,0,0,1)
+
+makeBF <- function(x) {x <- 1.0E-9 + x;log10(x/sum(x*income$probSchool,na.rm=TRUE))} # Approximate
+incomeBF <- income %>% 
+  dplyr::select(matches("x$"),-totprobx) %>% 
+  mutate_each(funs(makeBF)) %>% 
+  setNames(gsub("(.+)x$","BF_\\1x",names(.))) %$%
+  bind_cols(income[1:4],.)
+
+incomeBFdiscrete <- incomeBF %>% dplyr::select(5:ncol(incomeBF)) %>% filter(complete.cases(.)) %>%
+  lapply(function(x) discretize(data.frame(x[ifelse(is.na(x),FALSE,x>-5)]),method='quantile',breaks=5))
+incomeBFlowestState <- incomeBF %>% dplyr::select(5:ncol(incomeBF)) %>% filter(complete.cases(.)) %>%
+  lapply(function(x) ifelse(x<= -5,"(-Inf,-5]",'FALSE'))
+incomeBFd <- mapply(function(x,y) {
+  tmp <- x
+  tmp[tmp=='FALSE'] <- as.character(y[[1]])
+  return(factor(tmp,levels=c("(-Inf,-5]",levels(y[[1]]))))},
+  incomeBFlowestState,incomeBFdiscrete,SIMPLIFY = FALSE)
+names(incomeBFd) <- names(incomeBFdiscrete)
+incomeBFd %<>% data.frame %>% tbl_df
+rm(list=c('incomeBFdiscrete','incomeBFlowestState'))
+
+incomeBFd <-  incomeBF %>% 
+  filter(complete.cases(incomeBF %>% dplyr::select(5:ncol(incomeBF)))) %>% 
+  dplyr::select(1:4) %>% 
+  bind_cols(incomeBFd)
+```
+
+Here, I did some cluster analysis using package `poLCA`  but ultimately set
+it aside to be dug into later...
+```{r}
+# #-------------------------------------
+# bmod <- poLCA(as.formula(paste0('cbind(',paste(names(incomeBFd)[-(1:4)],collapse=','),') ~ 1')),
+#               data=incomeBFd,nclass = 9,nrep=13,na.rm=FALSE)
+# new.probs.start <- poLCA.reorder(bmod$probs.start,order(bmod$P,decreasing=TRUE))
+# bmod <- poLCA(as.formula(paste0('cbind(',paste(names(incomeBFd)[-(1:4)],collapse=','),') ~ 1')),
+#               data=incomeBFd,nclass = 9,probs.start=new.probs.start,na.rm=FALSE)
+# 
+# # Compute the mutual information shared by each variable with the class labels:
+# miBFclass <- incomeBFd %>% 
+#   mutate(class=bmod$predclass) %$% 
+#   sapply(grep('^BF',names(.),value=TRUE),mInfo,ynm='class',data=.) %>% 
+#   sort(decreasing=TRUE) %T>%
+#   print
+# incomeBFd %>% 
+#   mutate(class=bmod$predclass) %>% 
+#   inner_join(incomeBF,by='unitID') %>% 
+#   group_by(class) %>% 
+#   summarize_each(funs(median),matches('x.y$')) %>%
+#   dplyr::select(one_of(names(miBFclass))) %>% 
+#   print(width=Inf)
+# 
+# incomeBFd %>% 
+#   dplyr::select(-c(1,3:4)) %>% 
+#   mutate(class=bmod$predclass) %>% 
+#   filter(class==9) %>% 
+#   print(n=20,width=Inf)
+# 
+# incomeBFd %>% 
+#   mutate(class=bmod$predclass) %>% 
+#   filter(grepl("Cali.+Insti.+Tech|Harvard|Mass.+Inst.+Tech|Northwestern Univ|Princeton|Cornell U",
+#                College)) %>%
+#   dplyr::select(one_of(setdiff(names(.),names(miBFclass))),one_of(names(miBFclass))) %>% 
+#   arrange(class) %>%
+#   print(width=Inf)
+# #---------------------------------------
+#===================================================
+```
+### Student Aid:
+```{r}
+aid <- student %>% 
+  dplyr::select(unitID,College,UGDS,matches("pell_ever|fsend")) %>%
+  mutate(probSchool = UGDS/sum(UGDS),
+         totprob    = rowSums(as.matrix(.[grepl('fsend',names(.))])))
+aid %>% print(n=20)
+makeBF <- function(x) {x <- 1.0E-9 + x;log10(x/sum(x*aid$probSchool,na.rm=TRUE))} # Approximate
+aidBF <- aid %>% 
+  dplyr::select(matches("pell_ever|fsend")) %>% 
+  mutate_each(funs(makeBF)) %>% 
+  setNames(paste0("BF_",names(.))) %$%
+  bind_cols(aid[1:3],.)
+
+g <- aidBF %>% gather(key=Variable,value=BF,-(1:3)) %>%
+  ggplot(aes(x=BF,fill=Variable))
+g + geom_density(alpha=0.3) + 
+  facet_wrap(~Variable) + 
+  scale_x_continuous(lim=c(-1,1)) + 
+  theme(text=element_text(size=14,face = 'bold'))
+#===================================================
+```
+### Earnings after graduation (6 years on)
+```{r}
+earnRepay <- student %>% 
+  dplyr::select(unitID,College,UGDS,matches("^(RPY|CDR|.+earn_wne_p6)")) %T>% 
+  print(n=20) %>%
+  mutate(probSchool = UGDS/sum(UGDS),
+         sdlog         = sqrt(log((sd_earn_wne_p6_2005/mn_earn_wne_p6_2005)^2+1)),
+         meanlog       = log(mn_earn_wne_p6_2005^2/sqrt(mn_earn_wne_p6_2005^2+sd_earn_wne_p6_2005^2)),
+         p_le30K       = plnorm(30.0E3,meanlog,sdlog),
+         p_gt30Kle48K  = plnorm(48.0E3,meanlog,sdlog)  - p_le30K,
+         p_gt48Kle75K  = plnorm(75.0E3,meanlog,sdlog)  - plnorm(48.0E3,meanlog,sdlog),
+         p_gt75Kle110K = plnorm(110.0E3,meanlog,sdlog) - plnorm(75.0E3,meanlog,sdlog),
+         p_gt110K      = plnorm(110.0E3,meanlog,sdlog,lower.tail=FALSE),
+         totprob       = p_le30K + p_gt30Kle48K + p_gt48Kle75K + p_gt75Kle110K + p_gt110K) %>%
+  dplyr::select(1:7,probSchool,starts_with('p_')) %T>%
+  print(n=20)
+
+makeBF <- function(x) {x <- 1.0E-9 + x;log10(x/sum(x*earnRepay$probSchool,na.rm=TRUE))} # Approximate
+earnRepayBF <- earnRepay %>% 
+  dplyr::select(-c(1:3,5:8)) %>% 
+  mutate_each(funs(makeBF)) %>% 
+  setNames(paste0("BF_",names(.))) %$%
+  bind_cols(earnRepay[c(1:3,8)],.) %>%
+  filter(complete.cases(.))
+
+earnRepayBF %>% 
+  dplyr::select(-3) %>% 
+  inner_join(student %>% dplyr::select(unitID,ADM_RATE),by='unitID') %>% 
+  filter(!is.na(ADM_RATE)) %>% 
+  mutate(ADM_RATEd=discretize(.['ADM_RATE'],method='interval',breaks=6)[['ADM_RATE']]) %>% 
+  arrange(desc(BF_p_gt110K)) %>% 
+  filter(BF_p_le30K<0.5 & BF_p_gt110K>0.5) %$% 
+  qplot(x=BF_p_le30K,y=BF_p_gt110K,color=ADM_RATEd) + geom_text(aes(label=College))
+#===================================================
+```
+### College Setting: locale & region.
+```{r}
+student %$% { locale %>% summary %>% print }
+student %$% { region %>% summary %>% print }
+
+localeNames <- sort(unique(as.character(student$locale)))
+localeAggregates <- setNames(c(gsub('([^ ]+) ([^ ]+).+','\\1\\2',localeNames[1:3]),
+                               rep('Rural',3),
+                               gsub('([^ ]+) ([^ ]+).+','\\1\\2',localeNames[7]),
+                               rep('Suburb:Small/Midsize & Town:Fringe',2),
+                               gsub('([^ ]+) ([^ ]+).+','\\1\\2',localeNames[10]),
+                               'Suburb:Small/Midsize & Town:Fringe',
+                               gsub('([^ ]+) ([^ ]+).+','\\1\\2',localeNames[12])),localeNames)
+student %<>% mutate(localeAgg = factor(localeAggregates[as.character(locale)],
+                                       levels=c('Rural','Town:Remote','Town:Distant','Suburb:Small/Midsize & Town:Fringe',
+                                                'Suburb:Large','City:Small','City:Midsize','City:Large')))
+makeBF <- function(x) {x <- 1.0E-9 + x;log10(x/sum(x*settingBF$probSchool,na.rm=TRUE))} # Approximate
+settingBF <- student %>% 
+  dplyr::select(unitID,College,UGDS,localeAgg,region) %>%
+  mutate(probSchool = UGDS/sum(UGDS))
+a <- settingBF %$% model.matrix(~localeAgg - 1,data=.)
+colnames(a) <- gsub('^([^:]+):*(.+)$','BF_\\1\\2',colnames(a))
+a %<>% as.data.frame %>% tbl_df %>% mutate_each(funs(makeBF))
+settingBF %<>% dplyr::select(-localeAgg) %>% bind_cols(a)
+
+a <- settingBF %>%
+  mutate(regionName = factor(gsub(' ','',as.character(student$region)))) %$% 
+  model.matrix(~regionName - 1,data=.)
+colnames(a) <- gsub('^regionName','BF_',colnames(a))
+a %<>% as.data.frame %>% tbl_df %>% mutate_each(funs(makeBF))
+settingBF %<>% dplyr::select(-region) %>% bind_cols(a)
+```
+Didn't get around to adding in costs...
+```{r}
+#===================================================
+#costBF
+#===================================================
+```
+### Academics: Completion rates, admissions rates and SAT scores.
+Took a look at scaled test scores, but ultimately settled upon the log-normal
+fits to SATs below.
+```{r}
+# scaleSAT <- function(Score) (Score - 280)/(800 - 280)
+# scaleACT <- function(Score) (Score -   9)/( 36 -   9)
+# Impute missing values with the means
+#lmtest <- lm(ACTCMMID ~ SAT_AVG,data=student)
+
+# academicsBF <- student %>% 
+#   filter(!(isSpecialty=='TRUE' & is.na(ADM_RATE))) %>%
+#   dplyr::select(unitID,College,ADM_RATE,matches('(^C150)|(SAT|ACT)')) %>%
+#   filter(!is.na(C150_4_POOLED_SUPP)) %>%
+#   mutate(ADM_RATE = ifelse(is.na(ADM_RATE),mean(ADM_RATE,na.rm=TRUE),ADM_RATE)) %>%
+#   mutate(SAT_AVG_scaled  = scaleSAT(ifelse(is.na(SAT_AVG) , mean(SAT_AVG,na.rm=TRUE), SAT_AVG))) %>%
+#   mutate(ACTCMMID_scaled = scaleACT(ifelse(is.na(ACTCMMID),mean(ACTCMMID,na.rm=TRUE),ACTCMMID))) %>%
+#   dplyr::select(1:3,ncol(.) - (2:0))
+
+# a <- academicsBF %>% 
+#   mutate_each(funs(scaleSAT),starts_with('SAT'),-ends_with('scaled')) %>% 
+#   mutate_each(funs(scaleACT),starts_with('ACT'),-ends_with('scaled')) %>%
+#   gather(key=Test,value=scaledScore,-unitID,-College,-ADM_RATE)
+```
+***NOTE:*** This is a bit of a kludge, but it results in a distribution for SAT
+Verbal+Math scores for each school, from which Bayes factors for 200-pt
+intervals are computed. (Kludginess: Adding the quartiles of Verbal & Math
+DOES NOT equal the quartiles of Verbal+Math.)
+```{r}
+student %>% 
+  mutate(SAT_25=SATVR25+SATMT25,SAT_75=SATVR75+SATMT75) %>% 
+  filter(!is.na(SAT_AVG) & !is.na(SAT_75)) %>% 
+  ggplot(aes(x=SAT_AVG)) + geom_density(fill='orange',alpha=0.3) + 
+  geom_density(aes(x=SAT_25),fill='red',alpha=0.1) + 
+  geom_density(aes(x=SAT_75),fill='green',alpha=0.1)
+
+academics <- student %>% 
+  mutate(SAT_25=SATVR25+SATMT25,SAT_75=SATVR75+SATMT75) %>% 
+  filter(!is.na(SAT_AVG) & !is.na(SAT_75)) %>% 
+  dplyr::select(unitID,College,UGDS,ADM_RATE,C150_4_POOLED_SUPP,SAT_25,SAT_AVG,SAT_75)
+
+
+# Clumsily fit log-normal distributions to the SAT score quartiles for each school.
+fr <- function(x,SAT_AVG,SAT_25,SAT_75,probs=c(0.25,0.75)) {
+  sdl <- x[1]
+  q <- qlnorm(p=probs,meanlog=log(SAT_AVG) - sdl^2/2,sdlog=sdl)
+  log(SAT_25/q[1])^2 + log(SAT_75/q[2])^2
+}
+getMuSd <- function(SAT_AVG,SAT_25,SAT_75) {
+  probs  <- c(0.25,0.75)
+  SAT_AVG0 <- SAT_AVG
+  if(SAT_75==1600) {
+    probs   <- probs/(0.75+1.0E-5)
+    SAT_AVG <- (SAT_AVG0 - 1600*(1-(0.75+1.0E-5)))/(0.75+1.0E-5)
+  }
+  soln <- optim(c(0.05), fr,lower=1.0E-3,upper=0.2,method='L-BFGS-B',
+                SAT_AVG=SAT_AVG,SAT_25=SAT_25,SAT_75=SAT_75,probs=probs)
+  sdl  <- soln$par
+  meanlog  <- log(SAT_AVG) - sdl^2/2
+  pSAT_AVG <- exp(meanlog+0.5*sdl^2)
+  q   <- qlnorm(p=probs,meanlog=meanlog,sdlog=sdl)
+  if(SAT_75==1600){
+    pSAT_AVG <- pSAT_AVG*(0.75+1.0E-5) + 1600*(1-(0.75+1.0E-5))
+  }
+  return(c(meanlog=meanlog,sdlog=sdl,pSAT_25=q[1],pSAT_AVG=pSAT_AVG,pSAT_75=q[2]))
+}
+```
+Get the log-normal parameters of the SAT distribution for each school
+```{r}
+academics <- academics %$% {bind_cols(.,as.data.frame(t(mapply(getMuSd,SAT_AVG,SAT_25,SAT_75))))}
+academics %>% 
+  filter(grepl('Harvard|Cal.+Inst.+Tech|Mass.+Inst.+Tech|Princeton U|Northwestern U|Cornell U',College)) %>% 
+  arrange(desc(SAT_AVG))
+```
+Discretize the SAT distributions
+```{r}
+academics %<>%
+  filter(!is.na(C150_4_POOLED_SUPP)) %>%
+  mutate(probSchool = UGDS/sum(UGDS),
+         p_le800        = plnorm( 800,meanlog,sdlog),
+         p_gt800le1000  = plnorm(1000,meanlog,sdlog) - p_le800,
+         p_gt1000le1200 = plnorm(1200,meanlog,sdlog) - plnorm(1000,meanlog,sdlog),
+         p_gt1200le1400 = plnorm(1400,meanlog,sdlog) - plnorm(1200,meanlog,sdlog),
+         p_gt1400       = plnorm(1400,meanlog,sdlog,lower.tail=FALSE),
+         totprob        = p_le800 + p_gt800le1000 + p_gt1000le1200 + p_gt1200le1400 + p_gt1400) %>%
+  print
+```
+Compute Bayes Factors for the discretized SAT score distributions of each school
+```{r}
+makeBF <- function(x) {x <- 1.0E-9 + x;log10(x/sum(x*academics$probSchool,na.rm=TRUE))} # Approximate
+academicsBF <- academics %>% 
+  dplyr::select(-c(1:3,matches('SAT|log|prob'))) %>% 
+  mutate_each(funs(makeBF)) %>% 
+  setNames(gsub("^p","BF_SAT",names(.))) %>%
+  setNames(gsub("^([^B])","BF_\\1",names(.))) %$%
+  bind_cols(academics[1:3],.)
+
+academicsBF %>% 
+  filter(grepl('Harvard|Cal.+Inst.+Tech|Mass.+Inst.+Tech|Princeton U|Northwestern U|Cornell U',College)) %>% 
+  arrange(desc(BF_SAT_gt1400)) %>% 
+  print(width=Inf)
+```
+Now add in the disciplines:
+```{r}
+makeBF <- function(x) {x <- 1.0E-9 + x;log10(x/sum(x*academics$probSchool,na.rm=TRUE))} # Approximate
+discplnsBF <-  academics %>% dplyr::select(unitID,probSchool) %>% inner_join(disciplines2013,by='unitID') %>%
+  mutate_each(funs(makeBF),-seq_len(which(names(.) == discNames[1])-1)) %>% 
+  setNames(c(setdiff(names(.),discNames),paste0('BF_',discNames)))
+
+academicsBF %<>% inner_join(discplnsBF %>% dplyr::select(unitID,starts_with('BF_')),by='unitID')
+```
+## Bringing the Data Together
+At this point, we've got enough pieces of the puzzle to construct a working
+model that demonstrates the concept of a decision analysis tool that takes as
+input a student's demographics and behavioral traits and the dataset of
+college Bayes factors and outputs a list of the top-N colleges maximizing the
+utility for that specific student.
+
+First join the separate data tables of Bayes factors into a single table.
+```{r}
+
+# NOW: Build the model covariate data frame with all possible covariate
+# candidates. Each student's model only uses a subset of these columns.  See
+# function 'utility'....
+studentBF <- student     %>% dplyr::select(unitID,College,UGDS,ADM_RATE) %>%
+  inner_join(incomeBF    %>% dplyr::select(-College,-UGDS), by='unitID') %>%
+  inner_join(ethnicBF    %>% dplyr::select(-College),       by='unitID') %>%
+  inner_join(aidBF       %>% dplyr::select(-College,-UGDS), by='unitID') %>%
+  inner_join(settingBF   %>% dplyr::select(-College,-UGDS,-probSchool), by='unitID') %>%
+  inner_join(earnRepayBF %>% dplyr::select(-College,-UGDS,-probSchool), by='unitID') %>%
+  #  inner_join(costBF      %>% dplyr::select(-College,-UGDS), by='unitID') %>%
+  inner_join(academicsBF %>% dplyr::select(-College,-UGDS), by='unitID') %>%
+  mutate(BF_prior = log10(nrow(.)*probSchool)) %>%
+  print(n=20)
+```
+## Mapping Student Traits to College Properties
+Get the coefficients for the student profile:
+Two levels of coefficients: 1.Property Category level, 2. Subcategory level
+
+Trait level has 4 types with impact on properties as follows when each trait increases from low to medium to high: 
+
+1. Risk      -- willingness to surround self with people & settings very different from self & origins;
+    + Weights homogeneity & sameness as self lower than other traits.
+2. Vision    -- willingness to look past short-term suitability in pursuit of future;
+    + Weights completion rates, future earnings, debt & debt repayment rates higher than current campus setting compatability.
+3. Breadth   -- willingness to entertain a variety of academic disciplines;
+    + Weights predominance of own major discipline lower than otherwise. 
+4. Challenge -- willingness to embrace highest academic rigor
+    + Weights admissions selectiveness, high SAT & higher than otherwise.
+
+                
+Could also add in more or less uncertainty to beta's according to traits as well...
+
+Traits Have Impact On Four Property Categories Listed in Rows:
+
+|                              |      Risk       |      Vision       |      Breadth       |      Challenge       |      Properties
+|  ----------------------------|-----------------|-------------------|--------------------|----------------------|---------------------------
+|   1. Self & Origins          | same to differ  |      ------       |      -------       |        ----          | ethn,inc,1stgen,usbrn,pov
+|   2. Campus Setting & Folks  |homog to diverse |      ------       |      -------       |        ----          | reg,loc,siz
+|   3. Academics               |      ----       |      ------       |  narrow to broad   | low to high sat/adm  | sat,admrt,disc
+|   4. After-College Prospects |      ----       |low to high dbt/ern|      -------       |        ----          | comprt,earn,rpy,dfltrt
+
+```{r}
+# This maps the student profile property names to the college Bayes factor data table ('studentBF') column names.
+
+propertyMap <- list(
+  ethnicity  = c(white='BF_WHITE',black='BF_BLACK',hispanic='BF_HISP',asian='BF_ASIAN'),
+  income     = list(dependent   = c(lt30K="BF_DEP_INC_PCT_LOx",gt30Kle110K="BF_DEP_INC_GTLO_LTH2x",gt110K="BF_DEP_INC_PCT_HI2x"),
+                    independent = c(lt30K="BF_IND_INC_PCT_LOx",gt30Kle110K="BF_IND_INC_GTLO_LTH2x",gt110K="BF_IND_INC_PCT_HI2x")),
+  sat        = c(le800='BF_SAT_le800',  gt800le1000='BF_SAT_gt800le1000', gt1000le1200='BF_SAT_gt1000le1200', 
+                 gt1200le1400='BF_SAT_gt1200le1400', gt1400='BF_SAT_gt1400'),
+  discipline = setNames(paste0('BF_',discNames),discNames),
+  fasfa      = c(fsend_1='BF_fsend_1_2005',fsend_2='BF_fsend_2_2005',fsend_3='BF_fsend_3_2005',fsend_4='BF_fsend_4_2005',fsend_5='BF_fsend_5_2005'),
+  region     = c(FarWest='BF_FarWest(AK,CA,HI,NV,OR,WA)',GreatLakes='BF_GreatLakes(IL,IN,MI,OH,WI)',MidEast='BF_MidEast(DE,DC,MD,NJ,NY,PA)',
+                 NewEngland='BF_NewEngland(CT,ME,MA,NH,RI,VT)',Plains='BF_Plains(IA,KS,MN,MO,NE,ND,SD)',RockyMountains='BF_RockyMountains(CO,ID,MT,UT,WY)',
+                 Southeast='BF_Southeast(AL,AR,FL,GA,KY,LA,MS,NC,SC,TN,VA,WV)',Southwest='BF_Southwest(AZ,NM,OK,TX)'),
+  locale     = c(Rural='BF_localeAggRural',TownRemote='BF_localeAggTownRemote',TownDistant='BF_localeAggTownDistant',
+                 SuburbSmallMid='BF_localeAggSuburbSmall/Midsize & Town:Fringe',SuburbLarge='BF_localeAggSuburbLarge',
+                 CitySmall='BF_localeAggCitySmall',CityMidsize='BF_localeAggCityMidsize',CityLarge='BF_localeAggCityLarge'),
+  earnings   = c(le30K='BF_p_le30K',  gt30Kle48K='BF_p_gt30Kle48K', gt48Kle75K='BF_p_gt48Kle75K', gt75Kle110K='BF_p_gt75Kle110K', gt110K='BF_p_gt110K' ),
+  prior      = 'BF_prior',
+  completion = 'BF_C150_4_POOLED_SUPP',
+  admission  = 'BF_ADM_RATE',
+  gender     = c(female='BF_female_2005',male='BF_female_2005')
+)
+```
+## Model Parameters -- The Partworths of the Utility Function
+A critical determinant of how well the tool works is the capturing of
+specific student value assessments of college properties. This is done using
+parameters beta in the utility function.  The function below does this.
+
+This is just to show one of the many ways in which this can be done.
+```{r}
+getParameters <- function(studentProfile,propertyMap){
+  # Get the coefficients for the student profile:
+  propCategory <- c('SelfOrigin','Setting','Academics','Prospects')
+  traitLvls    <- setNames(as.list(studentProfile$traits),c('Risk','Vision','Breadth','Challenge'))
+  propsByTrait <- list(Risk      = list(SelfOrigin = c('ethnicity','income'),
+                                        Setting    = c('region','locale')), 
+                       Vision    = list(Prospects  = c('completion','earnings'),
+                                        Setting    = c('region','locale')), 
+                       Breadth   = list(Academics  = c('discipline')), 
+                       Challenge = list(Academics  = c('sat','admission','discipline')))
+  
+  # beta <- matrix(rep(1,length(xBF)),ncol=1,dimnames=list(c('ethnicity','income','sat','fasfa'),'Utility'))
+  beta <- matrix(rep(1,length(propertyMap)),ncol=1)
+  rownames(beta) <- names(propertyMap)
+  beta['admission',1] <- -1.0  # prefer schools that have lower admissions rates
+  beta['locale'   ,1] <-  0.5  # downweight locale
+  beta['fasfa'    ,1] <-  0.3  # downweight fasfa
+  # assumes stronger influence of gender for women than men...
+  beta['gender'   ,1] <- ifelse(studentProfile$gender == 'female',0.5,-0.1) 
+  # (^_^) ...there's gotta be a better way of doing this...
+  for(pCat in propCategory){
+    prpnm <- propsByTrait$Risk[[pCat]]
+    if (!is.null(prpnm)){
+      # must have vectors for each trait level with as many elements as are in the vectors of the propsByTrait list
+      beta[prpnm,1] <- beta[prpnm,1] * switch(traitLvls$Risk,
+                                              L=list(SelfOrigin=c(ethnicity=3.0,income=2.0),
+                                                     Setting=c(region=3.0,locale=3.0))[[pCat]],
+                                              M=list(SelfOrigin=c(ethnicity=0.3,income=0.3),
+                                                     Setting=c(region=1.0,locale=1.0))[[pCat]],
+                                              H=list(SelfOrigin=c(ethnicity=0.1,income=0.1),
+                                                     Setting=c(region=0.1,locale=0.1))[[pCat]])
+    }
+    prpnm <- propsByTrait$Vision[[pCat]]
+    if (!is.null(prpnm)){
+      beta[prpnm,1] <- beta[prpnm,1] * switch(traitLvls$Vision,
+                                              L=list(Prospects=c(completion=0.1,earnings=0.1),
+                                                     Setting  = c(region=1.5,locale=1.5))[[pCat]],
+                                              M=list(Prospects=c(completion=1.0,earnings=0.5),
+                                                     Setting  = c(region=1.0,locale=1.0))[[pCat]],
+                                              H=list(Prospects=c(completion=3.0,earnings=3.0),
+                                                     Setting  = c(region=0.5,locale=0.5))[[pCat]])
+    }
+    prpnm <- propsByTrait$Breadth[[pCat]]
+    if (!is.null(prpnm)){
+      beta[prpnm,1] <- beta[prpnm,1] * switch(traitLvls$Breadth,
+                                              L=list(Academics=c(discipline=3.0))[[pCat]],
+                                              M=list(Academics=c(discipline=1.0))[[pCat]],
+                                              H=list(Academics=c(discipline=0.3))[[pCat]])
+    }
+    prpnm <- propsByTrait$Challenge[[pCat]]
+    if (!is.null(prpnm)){
+      beta[prpnm,1] <- beta[prpnm,1] * switch(traitLvls$Challenge,
+                                              L=list(Academics=c(sat=0.1,admission=0.1,discipline=0.3))[[pCat]],
+                                              M=list(Academics=c(sat=1.0,admission=1.0,discipline=1.0))[[pCat]],
+                                              H=list(Academics=c(sat=3.0,admission=3.0,discipline=3.0))[[pCat]])
+    }
+  }
+  
+  # Also, make the beta's of traits sum to 1 at each level so that final utility
+  # is roughly same magnitude as a typical Bayes factor for school properties.
+  # This facilitates interpretation of utility in similar fashion as a raw Bayes factor.
+  beta[,1] <- beta[,1]/sum(beta[,1])
+  
+  return(beta)
+}
+
+
+```
+## Utility Function to be Maximized for the Student
+Now the utility function of the discrete choice model:
+```{r}
+#===================================================================
+# Here's the Decision Analysis Model: Probabilistic, Utility-Based Discrete Choice Model
+utility <- function(studentBF,studentProfile,propertyMap,dump.covariates=FALSE){
+  # studentBF must come in as a 1-row matrix!!!
+  
+  covarnames <- sapply(names(propertyMap),function(propnm){
+    if(propnm == 'income'){
+      return(propertyMap$income[[ifelse(studentProfile$dependent,
+                                        'dependent',
+                                        'independent')]][studentProfile[[propnm]]])
+    }
+    levelName <- studentProfile[[propnm]]
+    if(is.null(levelName)) return(propertyMap[[propnm]]) 
+    return(propertyMap[[propnm]][levelName])
+  })
+  if(is.null(dim(studentBF))) {
+    xBF <- matrix(studentBF[covarnames],nrow=1,dimnames=list(NULL,covarnames))
+  } else {
+    xBF <- matrix(studentBF[,covarnames],nrow=1,dimnames=list(NULL,covarnames))
+  }
+  
+  # Assign useful column names...
+  colnames(xBF) <- paste(colnames(xBF),names(covarnames),sep=':')
+  
+  #show(xBF)
+  
+  # Compute the utility the student derives from the school.
+  beta <- setNames(studentProfile$beta,colnames(xBF))
+  u    <- xBF %*% beta
+  
+  if (dump.covariates){
+    wxBF <- xBF * matrix(beta,nrow=nrow(xBF),ncol=ncol(xBF),byrow = TRUE)
+    colnames(wxBF) <- colnames(xBF)
+    return(wxBF)
+  } else {
+    return(u[1])
+  }
+}
+```
+## Archetypical Student Profiles
+We now specify student profiles and test out the model to judge how
+reasonable are its rankings of colleges per specific student criteria.
+```{r}
+
+#=====================================================
+# Define (3 levels)^(4 traits) = 3^4 = 81 student trait archetypes:
+# Trait level has 4 categories with impact on subtraits as follows when each
+# trait increases from low to medium to high:
+# 1. Risk      -- willingness to surround self with people & settings very different from self & origins;
+#                 i. Weights homogeneity & sameness as self lower than other traits.
+# 2. Vision    -- willingness to look past short-term suitability in pursuit of future;
+#                 i. Weights completion rates, future earnings, debt & debt repayment rates higher 
+#                    than current campus setting compatability.
+# 3. Breadth   -- willingness to entertain a variety of academic disciplines;
+#                 i. Weights predominance of own major discipline lower than otherwise. 
+# 4. Challenge -- willingness to embrace highest academic rigor
+#                 i. Weights admissions selectiveness, high SAT & higher than otherwise.
+makeTraitLabels <- function(trait,ntrait,levels){
+  # Note that this must be called with positive integers for 'trait' & 'ntrait' and ntrait <= length(levels) 
+  # (with intention to use ntrait==length(levels)) where 'levels' is a list of character vectors.
+  # Will return a character vector with length = prod(sapply(levels,length)).
+  if(trait>=ntrait) return(levels[[trait]])
+  return(c(sapply(levels[[trait]],paste0,makeTraitLabels(trait+1,ntrait,levels))))
+}
+traitLevels  <- list(Risk=c('Lr','Mr','Hr'),Vision=c('Lv','Mv','Hv'),Breadth=c('Lb','Mb','Hb'),Challenge=c('Lc','Mc','Hc'))
+traitLabels  <- makeTraitLabels(trait=1,ntrait=length(traitLevels),levels=traitLevels)
+StudentTrait <- setNames(strsplit(traitLabels,'[a-z]'),traitLabels)
+#=====================================================
+```
+Modal States of Each Student Property:
+```{r}
+a <- studentBF %>% dplyr::select(probSchool,starts_with('BF')) %>% as.matrix
+meanBF <- t(a[,1] %*% a[,-1])
+# *** PROBLEMATIC FOR MAINTENANCE & REVISION: MUST RESET THESE IF ANY COLUMNS CHANGE IN studentBF ***
+inm <- setNames(c(2,6,9,1,1,5,8,8,1,5,1,1,5,38),
+                c('dependent','income','ethnicity','gender','pellgrant','fasfa',
+                  'locale','region','defaultrate','earnings','admissions',
+                  'completion','sat','discipline')) 
+propNames <- mapply(function(i,si) rownames(meanBF)[seq(si-i+1,length.out=i)],inm,cumsum(inm))
+domProps  <- sapply(propNames,function(nms) names(meanBF[nms,])[which.max(meanBF[nms,])])
+show(domProps)
+```
+Create a few specific student profiles
+
+(Check function 'utility' for valid entries for the student profile properties:
+valid entries appear as the names() of vectors 'ethlist', 'inclist', etc.)
+```{r}
+students <- list(
+  Black = list(
+    dependent = TRUE,
+    ethnicity = 'black',
+    gender    = 'female',
+    age       = 'le24',
+    income    = 'gt30Kle110K',
+    earnings  = 'gt110K',
+    sat       = 'gt1000le1200',
+    fasfa     = 'fsend_4',
+    discipline= 'SocialSciences',
+    region    = 'MidEast',
+    locale    = 'CityLarge',
+    traits    = StudentTrait$MrMvMbMc
+  ),
+  White = list(
+    dependent = TRUE,
+    ethnicity = 'white',
+    gender    = 'female',
+    age       = 'le24',
+    income    = 'gt30Kle110K',
+    earnings  = 'gt110K',
+    sat       = 'gt1000le1200',
+    fasfa     = 'fsend_4',
+    discipline= 'SocialSciences',
+    region    = 'MidEast',
+    locale    = 'CityLarge',
+    traits    = StudentTrait$MrMvMbMc
+  ),
+  Hispanic = list(
+    dependent = TRUE,
+    ethnicity = 'hispanic',
+    gender    = 'female',
+    age       = 'le24',
+    income    = 'gt30Kle110K',
+    earnings  = 'gt110K',
+    sat       = 'gt1000le1200',
+    fasfa     = 'fsend_4',
+    discipline= 'SocialSciences',
+    region    = 'MidEast',
+    locale    = 'CityLarge',
+    traits    = StudentTrait$MrMvMbMc
+  ),
+  Asian = list(
+    dependent = TRUE,
+    ethnicity = 'asian',
+    gender    = 'female',
+    age       = 'le24',
+    income    = 'gt30Kle110K',
+    earnings  = 'gt110K',
+    sat       = 'gt1000le1200',
+    fasfa     = 'fsend_4',
+    discipline= 'SocialSciences',
+    region    = 'MidEast',
+    locale    = 'CityLarge',
+    traits    = StudentTrait$MrMvMbMc
+  ))
+
+```
+## Visualizing Model Parameters
+Let's look at plots of the model parameters for a few specific student types:
+```{r}
+
+# Test getParameters:
+plotBeta <- function(beta,stdtProf){
+  trtstr <- paste(paste(c('Risk','Vision','Breadth','Challenge'),stdtProf$traits,sep=":"),collapse=', ')
+  b <- data_frame(Trait=factor(rownames(beta),levels=rownames(beta)[order(beta[,1],decreasing=TRUE)]),Value=beta[,1])
+  gplt <- b %>% 
+    ggplot(aes(x=Trait,y=Value,fill=Trait)) 
+  (gplt + 
+    geom_bar(stat='identity',position='dodge') + 
+    #theme(text=element_text(face='bold')) + 
+    scale_y_continuous(lim=c(-1,1)/2) +
+    ggtitle(sprintf("Utility Partworths for %s",trtstr))) %>% print
+}
+```
+Note how the parameters change with the behavior traits of Risk, Vision, Breadth & Challenge.
+```{r}
+stdtProf <- students$White
+beta1 <- getParameters(stdtProf,propertyMap)
+plotBeta(beta1,stdtProf)
+
+stdtProf <- students$White
+stdtProf$traits <- StudentTrait$HrLvLbHc
+beta2 <- getParameters(stdtProf,propertyMap)
+plotBeta(beta2,stdtProf)
+
+stdtProf <- students$White
+stdtProf$traits <- StudentTrait$LrHvHbLc
+beta3 <- getParameters(stdtProf,propertyMap)
+plotBeta(beta3,stdtProf)
+```
+
+# Generating Personalized College Rankings
+What follows is function `studentCaseStudy` the 'work horse' function to
+provide the student with personalized college rankings:
+
+```{r}
+# Define a function to assess the suitability of colleges for a specific student's profile:
+studentCaseStudy <- function(studentBF,stdtProf,propertyMap,ntop=20,signifLevel=0.15,verbose=FALSE,exact=FALSE){
+  utilities <- studentBF %>% 
+    dplyr::select(starts_with('BF')) %>%
+    apply(1,utility,studentProfile=stdtProf,propertyMap=propertyMap) %>%
+    setNames(studentBF$College)
+  
+  tmp <- studentBF %>% 
+    dplyr::select(starts_with('BF')) %>%
+    slice(1) %>% as.matrix %>%
+    utility(studentProfile=stdtProf,propertyMap=propertyMap,dump.covariates=TRUE)
+  
+  wxBF <- studentBF %>% 
+    dplyr::select(starts_with('BF')) %>%
+    apply(1,utility,studentProfile=stdtProf,propertyMap=propertyMap,dump.covariates=TRUE) %>%
+    t %>% as.data.frame %>% tbl_df %>%
+    setNames(gsub('^[^:]+:','',colnames(tmp))) %>%
+    mutate(unitID  = studentBF$unitID,
+           College = studentBF$College,
+           Utility = utilities) %>% 
+    arrange(desc(Utility)) %>%
+    dplyr::select(unitID,College,Utility,everything())
+  
+  labels <- sprintf("%d. %s",order(order(utilities,decreasing=TRUE)),names(utilities))
+  
+  stdtUtility <- data_frame(unitID  = studentBF$unitID, 
+                            College = names(utilities),
+                            Utility = utilities) %>%
+    mutate(labels = factor(labels,levels=labels[order(Utility,decreasing=TRUE)]),
+           expChoice = 10^Utility,
+           ChoicePct = 100*expChoice/sum(expChoice)) %>%
+    dplyr::select(-expChoice) %>%
+    inner_join(wxBF %>% dplyr::select(-College,-Utility),by='unitID') %>% 
+    arrange(desc(Utility)) #%T>% print
+  
+  topN <- stdtUtility %>% dplyr::select(-College) %>% top_n(ntop,Utility) 
+  
+  if(verbose) {
+    topN %>% print
+    traitStr <- paste(paste(c('Risk','Vision','Breadth','Challenge'),stdtProf$traits,sep=":"),collapse=', ')
+    profText <- stdtProf[!grepl('beta|traits',names(stdtProf))]
+    pltTitle <- paste(strwrap(paste(paste(names(profText),profText,sep=':'),collapse=', '),width = 80),collapse='\n')
+    pltTitle <- paste0("Top ",ntop," Colleges for Profile:\n",pltTitle,'\n',traitStr)
+    
+    gplt0 <- topN %>% 
+      mutate(labels = factor(labels,levels=rev(levels(labels))),
+             labelY = pmin(0,min(Utility))) %>%
+      ggplot(aes(x=labels,y=Utility,fill=labels))
+    gplt <-  gplt0 +
+      geom_bar(stat='identity',position='dodge') + coord_flip() + 
+      geom_text(aes(x=labels,y=labelY,label=labels),size=6,hjust=0,vjust=0.5) +
+      theme(text=element_text(face='bold',size=8),
+            axis.text.y=element_blank(),
+            title=element_text(size=12,face='bold'),
+            legend.position = "none") +
+      ggtitle(pltTitle) +
+      labs(x=sprintf("Top %d Colleges",ntop)) 
+    gplt %>% print
+  }
+  
+  # Back-calculate the beta coefficients and see if can determine which
+  # covariate contributed most strongly to the utility rankings.
+  stdtBF <- stdtUtility %>% 
+    inner_join(studentBF %>% dplyr::select(-College),by='unitID')
+  axbf <- stdtBF %>% dplyr::select(one_of(gsub('^[^:]+:','',colnames(tmp)))) %>% as.matrix
+  betacoeff <- solve(t(axbf) %*% axbf,t(axbf) %*% matrix(stdtUtility$Utility,ncol=1))
+  
+  if(verbose) show(betacoeff[betacoeff>1.0E-9,])
+  
+  stdtBF %<>%
+    dplyr::select(c(4,3,5),one_of(names(betacoeff[abs(betacoeff)>1.0E-9,]))) 
+  
+  if(verbose) stdtBF %>% print(n=ntop,width=Inf)
+  
+  utlBFcor <- stdtBF %$% 
+    lapply(.[-(1:3)],function(y) cor.test(Utility[1:ntop],y[1:ntop],method='spearman',exact=exact)) #%T>% print
+  
+  # This shows which covariates dictate the rankings by utility. If significant
+  # negative correlation, then that covariate is important in the latter half of
+  # the ranking (note that reverse ordering due to negative coefficients is
+  # already accounted for).
+  pvals <- sapply(utlBFcor,'[[','p.value')
+  pvals <- pvals[!is.na(pvals)]
+  
+  signifCor <- utlBFcor[pvals <= pmax(signifLevel,min(pvals,na.rm=TRUE))] %$% {.[order(sapply(.,'[[','p.value'))]}
+  
+  if(verbose) signifCor %>% show
+  
+  results <- list(student=stdtProf,topN=topN,utilities=stdtUtility,BF=stdtBF,cor=utlBFcor,signifCor=signifCor,beta=betacoeff)
+  invisible(results)
+}
+```
+# Student Case Studies
+Ideally, we'd build a nice GUI/app around this model so that a student can
+enter his or her specific information and get a custom ranking of colleges.
+Here, we'll just manually specify a student and assess the results:
+```{r}
+# Assess a specific student's case:
+stdtProf <- students$Black
+#stdtProf$gender <- 'male'
+stdtProf$beta <- getParameters(stdtProf,propertyMap)
+caseResult    <- studentCaseStudy(studentBF,stdtProf,propertyMap,verbose=TRUE,ntop=20)
+```
+# How About a Road-Trip to Your Top-20 Schools?!
+I've copied idea and code snips from Tad Dallas's script on Kaggle.com:
+```{r eval=TRUE, echo=TRUE, tidy=TRUE}
+mortarBoardIcon <- makeIcon(
+  iconUrl = "https://upload.wikimedia.org/wikipedia/commons/thumb/7/76/Fxemoji_u1F393.svg/512px-Fxemoji_u1F393.svg.png",
+  iconWidth = 30, iconHeight = 30)
+
+schools <- caseResult$topN %>%
+  inner_join(student %>% 
+               dplyr::select(c(unitID,College,city,state,zip,median_hh_inc_2005,lon,lat)), by='unitID') %>%
+  mutate(info = paste0(College,'<br>',city,', ',state,' ',zip,
+                       sprintf('<br> Rank: %d Utility: %.2f',seq_along(Utility),Utility)))
+map <- leaflet(schools) %>% 
+  setView(-93.65, 42.0285, zoom = 4) %>%
+  addTiles() %>%
+  addMarkers(~lon, ~lat, popup=~info,
+             options = popupOptions(closeButton = TRUE),
+             clusterOptions = markerClusterOptions(), 
+             icon = mortarBoardIcon)
+#print(map)
+map
+
+```
+
+
+# Sensitivity Analysis
+
+Finally, we'll do a brief set of sensitivity analyses illustrating how
+the college rankings change with the student's demographics and behavioral
+traits.  
+
+We generate barplots of the utilities of the top 20 colleges for specific
+student profiles. (You may want to just execute
+`print(sensResults$grobList)` at the console after running the script
+just to see individual top-10 school barplots in a legible format.)
+```{r}
+#=======================================
+### SENSITIVITY ANALYSIS:
+# Define a function for one-variable-at-a-time analysis of the student profile properties:
+#if(FALSE){
+# paropts <- par(no.readonly=TRUE)
+sensitivity <- function(studentBF,stdtProf0,pmap,StudentTrait,propertyMap,maxcnt=Inf,plot.it=TRUE){
+  #require(gridExtra)
+  propnms <- names(pmap)
+  cnt <- 0
+  
+  caseList <- list()
+  grobList <- list()
+  for(propnm in propnms){
+    stdtProf <- stdtProf0
+    # par(mfrow=c(2,ceiling(length(pmap[[propnm]])/2)))
+    if(propnm == 'income') {
+      if(stdtProf$dependent) {
+        lvls <- names(pmap[[propnm]]$dependent)
+      } else {
+        lvls <- names(pmap[[propnm]]$independent)
+      }
+    } else {
+      lvls <- names(pmap[[propnm]])
+    }
+    for(levelnm in lvls){
+      stdtProf[[propnm]] <- levelnm
+      stdtProf$beta <- getParameters(stdtProf,propertyMap)
+      caseResult    <- studentCaseStudy(studentBF,stdtProf,propertyMap,ntop = 10,verbose = FALSE)
+      
+      profText <- c(stdtProf[propnm],stdtProf[!grepl(paste0('beta|traits|',propnm),names(stdtProf))])
+      pltTitle <- paste(strwrap(paste(paste(names(profText),profText,sep=':'),collapse=', '),width = 80),collapse='\n')
+      traitStr <- paste(paste(c('Risk','Vision','Breadth','Challenge'),stdtProf$traits,sep=":"),collapse=', ')
+      pltTitle <- paste0("Top 10 Colleges for Profile:\n",pltTitle,'\n',traitStr)
+      
+      nms <- names(caseList)
+      caseList <- setNames(c(caseList,list(caseResult)), c(nms,pltTitle))
+      
+      #if(plot.it){
+      gplt0 <- caseResult$topN %>% 
+        mutate(labels = factor(labels,levels=rev(levels(labels))),
+               labelY = pmin(0,min(Utility))) %>%
+        ggplot(aes(x=labels,y=Utility,fill=labels))
+      gplt <-  gplt0 +
+        geom_bar(stat='identity',position='dodge') + coord_flip() + 
+        geom_text(aes(x=labels,y=labelY,label=labels),size=6,hjust=0,vjust=0.5) +
+        theme(text=element_text(face='bold',size=8),
+              axis.text.y=element_blank(),
+              title=element_text(size=12,face='bold'),
+              legend.position = "none") +
+        ggtitle(pltTitle) +
+        labs(x="Top 10 Colleges") 
+      #gplt %>% print
+      grobList <- c(grobList,list(gplt))
+      #}
+      
+      cnt <- cnt + 1
+      if(cnt>=maxcnt) break
+    }
+    if(cnt>=maxcnt) break
+  }
+  # par(paropts)
+  
+  ### UNFORTUNATELY, SEEMS TO LOSE CONTROL OF TEXT SIZE WHEN ggplots ARE LAID IN
+  ### GRID USING PACKAGE 'gridExtra'.... HELP!!!
+  #gmulti <- marrangeGrob(grobList,nrow=2,ncol=4)
+  if(plot.it) do.call(grid.arrange,grobList)
+  return(list(caseList=caseList,grobList=grobList))
+}
+```
+## Sensitivity Analysis #1:
+Perform sensitivity analysis for a stellar female student interested in 
+Engineering and a Large City setting, with a trait profile of Risk=High, 
+Vision=Low, Breadth=High, Challenge=High. We'll sweep over regions. 
+
+Note that because Breadth is High, she won't stick to strictly engineering
+schools. And because Vision is Low, she stresses region and locale more
+strongly than future earnings.
+```{r}
+stdtProf0 <- students$White
+stdtProf0$gender <- 'female'
+stdtProf0$discipline <- 'Engineering'
+stdtProf0$sat <- 'gt1400'
+stdtProf0$traits <- StudentTrait$HrLvHbHc # Risk=High, Vision=Low, Breadth=High, Challenge=High
+pmap <- propertyMap[c('region','ethnicity')]
+#pmap$ethnicity <- pmap$ethnicity[1:4]
+maxcnt <- length(pmap[[1]]) # Only flip ethnicity
+sensResults <- sensitivity(studentBF,stdtProf0,pmap,StudentTrait,propertyMap,maxcnt = maxcnt, plot.it = FALSE)
+print(sensResults$grobList)
+```
+
+## Sensitivity Analysis #2: 
+Perform sensitivity analysis for a stellar male student interested in
+Engineering and a Large City setting, with a trait profile of Risk=Low,
+Vision=Low, Breadth=High, Challenge=High. We'll sweep over ethnicity; then
+for fixed ethnicity=White, we'll sweep over region.
+
+Note that because Risk is Low, he'll strongly stress region & seek student
+populations that look a little more like himself.
+
+And in the case of Region = New England, the student's top-10 even has schools
+with negative utility!
+```{r}
+stdtProf0 <- students$White
+stdtProf0$gender <- 'male'
+stdtProf0$discipline <- 'Engineering'
+stdtProf0$sat <- 'gt1400'
+stdtProf0$traits <- StudentTrait$LrLvHbHc # Risk=Low, Vision=Low, Breadth=High, Challenge=High
+pmap <- propertyMap[c('ethnicity','region')]
+pmap$ethnicity <- pmap$ethnicity[1:4]
+pmap$region    <- pmap$region[c('NewEngland','Southeast','GreatLakes','FarWest')]
+maxcnt <- Inf
+sensResults <- sensitivity(studentBF,stdtProf0,pmap,StudentTrait,propertyMap,maxcnt = maxcnt, plot.it = FALSE)
+print(sensResults$grobList)
+```
+
+## Sensitivity Analysis #3: 
+Now, let's see what happens when that same stellar male student shows up with a trait
+profile with more risk and has a longer-term vision:
+```{r}
+stdtProf0 <- students$White
+stdtProf0$gender <- 'male'
+stdtProf0$discipline <- 'Engineering'
+stdtProf0$sat <- 'gt1400'
+stdtProf0$traits <- StudentTrait$HrHvHbHc # Risk=High, Vision=High, Breadth=High, Challenge=High
+pmap <- propertyMap[c('ethnicity','region')]
+pmap$ethnicity <- pmap$ethnicity[1:4]
+pmap$region    <- pmap$region[c('NewEngland','Southeast','GreatLakes','FarWest')]
+maxcnt <- Inf
+sensResults <- sensitivity(studentBF,stdtProf0,pmap,StudentTrait,propertyMap,maxcnt = maxcnt, plot.it = FALSE)
+print(sensResults$grobList)
+#}
+#------------------------------------------------------------
+```
+
+## Comments on Sensitivity Analyses
+As you can see, the student's value assessment, in terms of beta parameters
+(partworths), as determined by his or her behavioral traits and preferences
+strongly affects the top 10 high-utility schools for that student.
+
+Experiment with different student profiles, such as lower SAT's, and interest
+in alternative settings (locales other than Large City). The results are
+fascinating!
+
+Even better, alter the beta parameters directly yourself in `stdtProf0$beta`....
+
+# Next Steps
+Please, feel free to extend this model and tool. It'd be great to slap a
+quick Shiny interface on it so that a student can input his or her own
+demographics and criteria and quickly generate lists and charts detailing the
+student's best college options.
+
+Being posed in a probabilistic discrete choice modeling framework, this model
+represents lots of potential. It can, for example, be presented with
+individual student data -- imagine the entire dataset of applicants to a
+university plus the indication of which applicants were accepted or not --
+and then, using tools such as the package `rstan`, we could estimate
+data-based model parameters beta suitable for identifying candidates for a
+specific college.  This essentially reverse engineers the college's
+admissions criteria.
+
+It also offers a principled way of identifying which specific college is or
+is not a good choice for a student. 
+
+Even in its simplistic form shown here -- which didn't implement even some of
+the computed college properties -- it's quite entertaining to see how varied
+the rankings are given specific students -- e.g., a top student (SAT>1400)
+with a strong regional preference makes quite interesting choices as the
+region of interest changes. Try it out!
+
+Any feedback would be appreciated.
+
+Thanks,
+
+-Michael L. Thompson 
+
+[(my info at LinkedIn)](<https://www.linkedin.com/in/mlthomps>)
