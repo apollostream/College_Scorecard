@@ -4,7 +4,7 @@ R Markdown notebooks with analysis of the U.S. Dept. of Education College Scorec
 You'll need to download the SQLITE version of the College Scorecard database from Kaggle:  
 +  [database.sqlite](https://www.kaggle.com/kaggle/college-scorecard/downloads/database.sqlite)  
 
-Place the databse in your `../input` folder.  And place each of these scripts in your `../working` folder, which you'll set as your working directory using the R `setwd(...)` function. (I.e., `input` and `working` should be sibling folders residing in the same folder.)
+Place the database in your `../input` folder.  And place each of these scripts in your `../working` folder, which you'll set as your working directory using the R `setwd(...)` function. (I.e., `input` and `working` should be sibling folders residing in the same folder.)
 
 # Kaggle Script: Part 1  
 
@@ -31,5 +31,5 @@ And this is the resultant R Shiny app I built, hosted by the RStudio shinyio ser
 
 Let me know if you have any questions, ideas, or would like to collaborate on projects by contacting me at [my LinkedIn site](https://www.linkedin.com/in/mlthomps).
 
-Thanks,
+Thanks,  
 -Michael
