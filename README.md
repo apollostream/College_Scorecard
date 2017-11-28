@@ -25,7 +25,7 @@ This is the 2nd script I submitted:
 # Best College for You App  
 
 And this is the resultant R Shiny app I built, hosted by the RStudio shinyio server (**best to open it in a new browser tab**):   
-+  ["Best College for You App"](https://thompsonml.shinyapps.io/BestCollegeApp/).
++  [Best College for You App](https://thompsonml.shinyapps.io/BestCollegeApp/).
 
 # Feedback, please  
 
