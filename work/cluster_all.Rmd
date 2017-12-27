@@ -29,11 +29,14 @@ From there, I can apply hierarchical clustering to identify clusters in the new 
 
 [^2]: Jesse H. Krijthe (2015). **Rtsne: T-Distributed Stochastic Neighbor Embedding using a Barnes-Hut Implementation**, URL: [https://github.com/jkrijthe/Rtsne](https://github.com/jkrijthe/Rtsne)
 
-## Prepare Data
+## Setup
 
-We read in the College Scorecard dataset and convert columns into Bayes factors, which accentuate differences 
-amongst the colleges. Colleges having a disproportionately high number of students with a certain attribute
--- say, an SAT in excess of 1400 -- will have highly positive Bayes factors for that attribute.
+First, load packages from the local library....
+
+Note: The package **GraphAlignment** was downloaded and installed from BioConductor using the following R commands:
+
+>    `source("http://bioconductor.org/biocLite.R")`   
+     `biocLite("GraphAlignment")`
 
 ```{r setup, include=FALSE, message=FALSE, warning=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -47,8 +50,18 @@ if( file.exists("DataSpec.RData") ){
 }
 library( Rtsne )
 library( glmnet )
+library( infotheo )
+library( GraphAlignment )
+library( cowplot )
 
 ```
+
+## Prepare Data
+
+We read in the College Scorecard dataset and convert columns into Bayes factors, which accentuate differences 
+amongst the colleges. Colleges having a disproportionately high number of students with a certain attribute
+-- say, an SAT in excess of 1400 -- will have highly positive Bayes factors for that attribute.
+
 
 I strip out a lot of the variables that define the student body demographics.  The idea is that I'd
 like to identify structure in the "outcome" variables -- things like academic disciplines,
@@ -188,51 +201,53 @@ like we've got a decent model.
 # Get glmnet predictions of the t-SNE coordinates, combine them with the original t-SNE coordinates,
 # and plot the originals vs. predictions.
 lambda <- tsne_glmnet_all %$% { exp( mean(log(c(lambda.min,lambda.1se))) ) } # mid lambda
+lambda <- 1.87654485
 
-pred_df <- tsne_glmnet_all %>% 
-  predict( newx = mmat, s = lambda ) %>% 
-  drop() %>% 
-  as_data_frame() %>% 
-  setNames( c( "Y1", "Y2" ) ) %>%
-  mutate( rowid = 1:nrow(.) )
-
-tsne_df <- tsne_all$Y %>% 
-  as_data_frame() %>% 
-  setNames( c( "Y1", "Y2" ) ) %>% 
-  mutate( rowid = 1:nrow(.) ) %>%
-  gather( key = Coordinate, value = Value , -rowid )
-
-combo_df <- pred_df %>%
-  gather( key = Coordinate, value = Value , -rowid ) %>%
-  left_join( tsne_df, by = c('Coordinate','rowid'), suffix = c( "_glmnet","_tSNE" ) )
-
-combo_df %>%
-{
-  ggplot(., aes(x = Value_glmnet, y = Value_tSNE ) ) +
-    geom_point( alpha = 0.3 ) +
-    geom_abline( intercept = 0, slope = 1, color = 'red', linetype = 2, size = 1 ) +
-    facet_wrap( ~ Coordinate ) +
-    ggtitle( "t-SNE coordinates vs. glmnet predictions" ) +
-    theme( text = element_text( face = 'bold' ) )
+stack_coords <- function( coord_matrix ){
+  coord_matrix %>%
+    as_data_frame() %>% 
+    setNames( c( "Y1", "Y2" ) ) %>% 
+    mutate( rowid = 1:nrow(.) ) %>%
+    gather( key = Coordinate, value = Value , -rowid )
 }
 
-rm( pred_df, tsne_df, combo_df )
+# Plot t-SNE coords. vs. glmnet prediction of t-SNE coords.
+tsne_glmnet_all %>% 
+  predict( newx = mmat, s = lambda ) %>% 
+  drop() %>% 
+  stack_coords() %>%
+  left_join( 
+    y      = tsne_all$Y %>% stack_coords(), 
+    by     = c('Coordinate','rowid'), 
+    suffix = c( "_glmnet","_tSNE" ) 
+  )  %>%
+  {
+    ggplot(., aes(x = Value_glmnet, y = Value_tSNE ) ) +
+      geom_point( alpha = 0.3 ) +
+      geom_abline( intercept = 0, slope = 1, color = 'red', linetype = 2, size = 1 ) +
+      facet_wrap( ~ Coordinate ) +
+      ggtitle( "t-SNE coordinates vs. glmnet predictions" ) +
+      theme( text = element_text( face = 'bold' ) )
+  } %>%
+  print()
+
 ```
 
 ## Visualize the Colleges in 2-D
 
+Analogous to PCA, which has component (i.e., factor) loading vectors defining the basis vectors (dimensions) of the space and
+has a scores matrix defining the position of the items in the space, we'll use the 2-D t-SNE coordinates as our "factors" and as
+such the **glmnet** coefficients are the factor "loadings" projecting the raw Bayes factor features of the colleges (our "items") into the 2-D space. Therefore the t-SNE coordinates of the colleges serve as the "scores" matrix.
+
+### Get Factor "Loadings" from **glmnet** Coefficients
+
+Now the **glmnet** model coefficients will serve as the basis vectors (dimensions) of the biplot, since
+the model is simply a linear combo of the feature coefficients and each college's values for the respective features.
 
 ```{r derive_dimensions}
 
+# Get the sparse matrix of coefficients and strip down to only the non-zero coefficients.
 tsne_glmnet_coef_all <- tsne_glmnet_all %>% coef( s = lambda )
-# tsne_glmnet_coef_all$y1[-1] %>%
-# { (.)[abs((.)[,1])>0,1] } %>%
-# { data_frame(Coefficient = names(.), value = round(.,2)) } %>%
-#   print()
-# tsne_glmnet_coef_all$y2[-1] %>%
-# { (.)[abs((.)[,1])>0,1] } %>%
-# { data_frame(Coefficient = names(.), value = round(.,2)) } %>%
-#   print()
 
 tsne_coef_df_all <- 
   tsne_glmnet_coef_all$y1 %>% 
@@ -257,27 +272,46 @@ tsne_coef_df_all <-
     Y2 = ifelse( grepl(':',Coefficient), -Y2 , Y2 )
   )
 
-tsne_coef_df_all %>% mutate(mag = sqrt(Y1^2+Y2^2)) %>% arrange(desc(mag)) %>% print(n = 30)
+tsne_coef_df_all %>% 
+  mutate(mag = sqrt(Y1^2+Y2^2)) %>% 
+  arrange(desc(mag)) %>% 
+  mutate_at(funs(round(.,1)),.vars=vars(-Coefficient)) %>%
+  print(n = 30)
 
-
-# tsne_coef_df %>%
-# {
-#   ggplot(., aes(x=Y1,y=Y2,label=Coefficient)) +
-#     geom_point() +
-#     geom_text( check_overlap = TRUE )
-# } %>%
-#   print()
-
+# Designate coefficent vectors in the top 10% in magnitude as "key terms".
+# And sort from largest magnitude to smallest.
 key_terms <- tsne_coef_df_all %>% 
   mutate(mag= sqrt(Y1^2+Y2^2)) %>% 
   filter(abs(mag)>quantile(abs(mag),0.9)) %>% 
   arrange(desc(mag)) %$% Coefficient %>% setdiff("(Intercept)")
+```
+
+### Get "Scores" Matrix from t-SNE Coordinates
+
+The college 2-D t-SNE coordinates are the "scores" matrix, which we collect into a `data_frame` with ancillary info for
+labeling and coloring in our 2-D scatterplots.
+
+```{r get_schools}
+# For preliminary coloring in plot, divide colleges into categories that
+# capture the 10, 25, 75 and 90 percentiles along the Y2 axis, which has bee
+# rotated to point towards Ivy League colleges (specifically towards Harvard U.).
+categories <- { 
+  mmat[,key_terms] %*% 
+    (tsne_coef_df_all %>% filter(Coefficient %in% key_terms) %$% Y2) 
+} %>%
+  sapply(
+    function(x,q){ length(q) - sum(x>q) + 1 },
+    q=quantile(.,c(0.1,0.25,0.75,0.9))
+  ) %>%
+  factor()
 
 # Abbreviate names so they don't clutter the plots so much.
 shorten_names <- function( df ){
   college_names <- df %$% 
     College %>%
     { gsub('^[0-9_]+','',. ) } %>%
+    { gsub('The Univer.+ of Texas at ','U.T. ',.) } %>%
+    { gsub('Advancement of Science','Adv.Sci',.) } %>%
     { gsub('Northwestern University','NU',.) } %>%
     { gsub('University of Notre Dame','Notre Dame U.',.) } %>%
     { gsub('Cornell College','Cornell C',.) } %>%
@@ -312,20 +346,10 @@ shorten_names <- function( df ){
   }
   return( college_names )
 }
-
 college_names <- shorten_names( glmdata_all )
 college_names_student <- shorten_names( DataSpec$student)
 
-categories <- { 
-  mmat[,key_terms] %*% 
-    (tsne_coef_df_all %>% filter(Coefficient %in% key_terms) %$% Y2) 
-} %>%
-  sapply(
-    function(x,q){ length(q) - sum(x>q) + 1 },
-    q=quantile(.,c(0.1,0.25,0.75,0.9))
-  ) %>%
-  factor()
-
+# Collect all colleges and their t-SNE coords, Bayes factor for high-income, and category designators in a data_frame()
 tsne_df_all <- tsne_all$Y %>% 
   as_tibble() %>% 
   setNames(c("Y1","Y2")) %>% 
@@ -338,22 +362,10 @@ tsne_df_all <- tsne_all$Y %>%
   mutate_at(funs(scale(.)),.vars=vars(Y1,Y2))
 ```
 
-
-```{r visualize,fig.height=10,fig.width=11,echo=FALSE,results='hide',eval=FALSE}
-# tsne_df_all %>%
-# { 
-#   ggplot(.,aes(x=Y1,y=Y2,color=category)) + 
-#     geom_point() + 
-#     geom_text(aes(label=College),size=3,check_overlap = TRUE) +
-#     theme( text = element_text( face = 'bold' ) )
-# } %>%
-#   print()
-```
-
 ### Show Biplot for Structure Interpretation
 
-We can overlay the feature dimensions on the college scatterplot in the 2-D t-SNE coordinate space.  This allows
-us to more easily interpret the structure we're seeing.  
+As with a PCA biplot, we can overlay the feature dimensions on the college scatterplot in the 2-D t-SNE coordinate space.  
+This allows us to more easily interpret the structure we're seeing.  
 
 However, some of the interaction terms, in particular,
 are tricky to interpret because they have a positive value for a college if both of the features in the product
@@ -439,7 +451,7 @@ set.seed(137)
 cluster_id_all <- setNames( sample.int(n_cluster)[cluster_id_all], names(cluster_id_all) )
 ```
 
-```{r cluster_display}
+```{r cluster_display,fig.height=10,fig.width=11}
 tsne_mat_hc_all %>%
   as_tibble() %>%
   mutate( College = names(cluster_id_all), cluster = factor( cluster_id_all ) ) %>%
@@ -455,11 +467,156 @@ tsne_mat_hc_all %>%
   print()
 ```
 
+#### Characterize the Clusters
+
+For each cluster, calculate its mutual information with each (discretized) Bayes factor.
+
+```{r clstr_mi}
+fctr_clstr <- factor( sprintf( "C%02d", cluster_id_all ) )
+# df_cluster <- DataSpec$studentBF %>%  
+#   dplyr::select( College,one_of( unlist(strsplit(key_terms,":"))) ) %>% 
+#   mutate( cluster = fctr_clstr ) %>% 
+#   gather( key= Feature, value = Value, -cluster, -College )
+
+key_features <- unique(unlist(strsplit(tsne_coef_df_all$Coefficient,":")))
+
+df_cluster <- mmat %>% 
+  as_tibble() %>% 
+  dplyr::select( one_of( key_features ) ) %>%
+  bind_cols(DataSpec$studentBF %>% dplyr::select(unitID,College)) %>% 
+  mutate(cluster = fctr_clstr) %>%
+  gather( key= Feature, value = Value, one_of( key_features ) ) %>%
+  mutate( Feature = gsub('BF_','',Feature ) )
+
+df_median <- df_cluster %>% 
+  group_by(Feature,cluster) %>% 
+  summarize_at(funs(median),.vars=vars(Value)) %>% 
+  ungroup()
+
+#set.seed(131)
+college_label <- DataSpec$studentBF %>% 
+  mutate( 
+    cluster = fctr_clstr, 
+    shortname = college_names, 
+    Y1 = tsne_df_all$Y1, 
+    Y2 = tsne_df_all$Y2 
+  ) %>% 
+  group_by(cluster) %>% 
+  summarize(
+    i_max = which.max(BF_SAT_gt1400),
+    name_max_SAT   = shortname[i_max],
+    unitID_max_SAT = unitID[i_max],
+    Y1_max = Y1[i_max],
+    Y2_max = Y2[i_max]
+  )
+
+nm_max <- college_label %$% { setNames( name_max_SAT, as.character(cluster) ) }
+Y1_max <- college_label %$% { setNames( Y1_max, as.character(cluster) ) }
+Y2_max <- college_label %$% { setNames( Y2_max, as.character(cluster) ) }
+
+df_mi <- df_cluster %>% 
+  left_join( college_label, by = 'cluster' ) %>%
+  group_by( Feature ) %>% 
+  do(
+    {
+      feature <- (.)$Feature[[1]]
+      sapply(
+        levels(fctr_clstr),
+        function(clstr, min_lvl, nm_max, Y1_max, Y2_max ) {
+          c( 
+            name_max_SAT = nm_max[[clstr]],
+            Y1_max  = Y1_max[[clstr]],
+            Y2_max  = Y2_max[[clstr]],
+            Cluster = clstr,
+            median  = df_median %>% filter(Feature == feature, cluster == clstr ) %$% Value,
+            mi      = (.) %$% 
+              mutinformation( 
+                cluster == clstr, 
+                if( length( unique(Value) ) <= min_lvl ) {
+                  as.character(Value) 
+                } else {
+                  discretize( data.frame( Value = Value ) )
+                }
+              )
+          )
+        },
+        min_lvl = 5,
+        nm_max = nm_max, Y1_max = Y1_max, Y2_max = Y2_max
+      ) %>% 
+        t() %>%
+        as_data_frame() %>%
+        mutate( 
+          Feature = feature, 
+          median  = as.double(median), 
+          mi      = as.double(mi), 
+          Cluster = factor(Cluster) 
+        ) %>% 
+        dplyr::select( Feature, Cluster, median, mi, name_max_SAT )
+    }
+  ) %>% ungroup()
+
+df_mi_rel <- df_mi %>% 
+  group_by(Cluster) %>% 
+  mutate(is_max = mi %>% {. == max(.)}) %>% 
+  ungroup() %>% 
+  mutate( mi_rel = round(sign(median)*mi/max(mi),2) )  %>% 
+  arrange(Cluster, desc(mi) ) %>%
+  dplyr::select( Cluster, Feature, mi_rel, everything() )
+
+df_mi %<>% 
+  left_join( df_mi_rel %>% dplyr::select( 1:3 ), by = c('Cluster','Feature') )%>% 
+  mutate( Cluster_label = sprintf("%s (%s:{%4.1f,%4.1f})", Cluster, name_max_SAT,Y1_max,Y2_max ) )
+
+```
+
+Print a table of the features that most strongly characterize each cluster.
+
+```{r print_mi}
+df_mi_rel %>% 
+  filter(mi>=0.02 | is_max ) %>% 
+  mutate_at(funs(round(.,2)),.vars=vars(median,mi)) %>%  
+  print(n=Inf)
+
+```
+
+Plot all features of each cluster.
+
+```{r plot_mi,fig.width=8,fig.height=11}
+
+i_clstr_min <- 0L
+n_per_plot <- 14L
+n_seq <- fctr_clstr %>% nlevels() %>% {seq(n_per_plot,.,length.out = ./n_per_plot) %>% ceiling()} %>% floor()
+for( i_clstr_max in n_seq ){
+  df_mi %>% filter(  as.integer(Cluster) > i_clstr_min, as.integer(Cluster) <= i_clstr_max ) %>%
+  {
+    ggplot(., aes( x = Feature, y = mi_rel, fill = Feature ) ) +
+      geom_bar( stat = 'identity', position = 'dodge' ) +
+      ylim( c(-1,1) ) +
+      facet_wrap( ~ Cluster_label, nrow = 7, ncol = 2 ) +
+      ggtitle( 
+        label = "Characterization of Clusters by Feature", 
+        subtitle = "sign(median(Feature|Cluster==k))*MI(Cluster==k,Feature)/max(MI(Cluster,Feature))") +
+      theme( 
+        text = element_text( face = 'bold' ),
+        axis.text.x = element_text(angle=90,hjust=1,vjust=0.5, size = 6 ),
+        legend.position = 'none'
+      )
+  } %>% 
+    print()
+  i_clstr_min <- i_clstr_max
+}
+
+```
+
 ### Show Biplot with Cluster Coloring
 
-Finally, we can overlay the feature dimensions on the 2-D
-```{r biplot2,fig.height=10,fig.width=11}
+Finally, we can overlay the feature dimensions on the 2-D plot with cluster coloring.
+
+```{r biplot_prep}
+# Get cluster id for `n_cluster` number of clusters.
 cluster_id_all <- cutree( hc_all, k = n_cluster )
+
+# Determine bounds of coordinates for plot.
 y2_min <- -4
 y2_max <- 3.49
 y1 <- range(tsne_mat_hc_all[,1])
@@ -503,7 +660,10 @@ for( i in w2 ){
   tsne_modified$Y1[i] <- tsne_modified$Y1[i]*y2[bchk2[1,i]]/tsne_modified$Y2[i]
   tsne_modified$Y2[i] <- y2[bchk2[1,i]]
 }
+```
 
+```{r biplot2,fig.height=10,fig.width=11}
+# Plot cluster-colored biplot.
 tsne_modified %>%
   {
     ggplot(., aes( x = Y1, y = Y2 ) ) +
@@ -548,11 +708,163 @@ tsne_modified %>%
         show.legend = FALSE,
         alpha=0.3
       ) +
-      ggtitle( "t-SNE Biplot" ) +
+      ggtitle(
+        label    = "American College Landscape",
+        subtitle = "t-SNE Biplot with Bayes factors as features" 
+        ) +
       theme( text = element_text( face = 'bold' ) ) #+
       #scale_y_continuous(limits = c(y2_min,5))
   } %>%
   print()
+```
+
+## Graph Alignment: Linear Assignment Problem
+
+The t-SNE coordinates can be mapped to a regular 2-D grid by solving the Linear Assignment Problem [^4],[^5],[^6].
+
+[^4]: Blog post by by Vadim Markovtsev, 14 March 2017: [Jonker-Volgenant Algorithm + t-SNE = Super Powers](https://blog.sourced.tech/post/lapjv/?utm_source=Mailing+list&utm_campaign=8ed002c926-Kaggle_Newsletter_04-11-2017&utm_medium=email&utm_term=0_f42f9df1e1-8ed002c926-399303201)   
+[^5]: R. Jonker and A. Volgenant, **"A Shortest Augmenting Path Algorithm for Dense and Sparse Linear Assignment Problems,"** *Computing*, vol. **38**, pp. 325-340, 1987.  
+[^6]: See: [Linear Assignment Problem solver using Jonker-Volgenant algorithm](https://github.com/src-d/lapjv).  
+
+### Demonstrate LAP Graph Alignment
+
+We first apply LAP Graph Alignment to a simple problem.
+
+```{r lap_demo_0,fig.width=9,fig.height=3}
+set.seed( 13115 )
+N_obs <- 50^2
+N_clstr <- 6L
+mu  <- matrix( rt(N_clstr*2, df = 3),ncol=2 )
+p   <- rgamma(N_clstr,3,2) %>% {(.)/sum(.)}
+n   <- (p*N_obs) %>% ceiling() %>% {c(N_obs-sum(.[-1]),(.)[-1])}
+
+m   <- n %>% 
+  seq_along() %>% 
+  lapply(function(ix) (matrix( rnorm(n[ix]*2,sd=0.5), n[ix], 2 )+matrix(mu[ix,],n[ix],2,byrow=2))) %>%
+  {do.call(rbind,.)} %>%
+  {((.)-min(.))/diff(range(.))}
+
+par_old <- par( no.readonly = TRUE )
+par(mfrow=c(1,3))
+plot(m,col=rep(seq_along(n),times=n),main = 'Raw Points w/Original Colors' )
+
+m_tsne <- m %>% 
+  Rtsne() %$%
+  Y %>%
+  {((.)-min(.))/diff(range(.))}
+plot(m_tsne,col=rep(seq_along(n),times=n), main = 't-SNE w/Original Colors' )
+
+hc  <- m_tsne %>% dist() %>% hclust() %>% cutree(k=N_clstr)
+grid <- expand.grid(1:sqrt(N_obs),1:sqrt(N_obs)) %>% as.matrix() %>% {((.)-min(.))/diff(range(.))}
+plot(m_tsne,col=hc, main = 't-SNE w/Hierachical Clustering Colors')
+
+par( par_old )
+```
+
+```{r lap_demo_1,fig.width=10,fig.height=10}
+cost_matrix <- matrix(NA,nrow(m_tsne),nrow(grid))
+for( i in seq_len(nrow(m_tsne))){
+  for(j in seq_len(nrow(grid))){
+    cost_matrix[i,j] <- sqrt( sum((m_tsne[i,] - grid[j,])^2) )
+  }
+}
+cost_matrix = cost_matrix * (100000 / max(cost_matrix) )
+
+px <- LinearAssignment( cost_matrix )
+
+m_df <- m[px,] %>% 
+  set_colnames(c("X1","X2") ) %>% 
+  cbind( m_tsne[px,] %>% set_colnames(c("X1_tsne","X2_tsne") )) %>%
+  cbind(grid) %>% 
+  as_tibble() %>% 
+  mutate( cluster = factor( hc[px] ), row_id = as.character(1:nrow(.)) )
+
+plts <- list(
+  original = m_df %>%
+  {
+    ggplot(.,aes(x=X1,y=X2,color=cluster)) +
+      geom_point(size=2) +
+      lims( x=c(0,1.04), y=c(0,1.04) ) +
+      #geom_text( aes(label = row_id),nudge_y=0.02,size=2) +
+      theme( legend.position = 'none' )
+  },
+  tsne = m_df %>%
+  {
+    ggplot(.,aes(x=X1_tsne,y=X2_tsne,color=cluster)) +
+      geom_point(size=2) +
+      lims( x=c(0,1.04), y=c(0,1.04) ) +
+      #geom_text( aes(label = row_id),nudge_y=0.02,size=2) +
+      theme( legend.position = 'none' )
+  },
+  assigned = m_df %>%
+  { 
+    ggplot(.,aes(x=X1_tsne,y=X2_tsne,color=cluster) ) + 
+      geom_point(size=2 ) + 
+      geom_segment(
+        aes(xend=Var1,yend=Var2),
+        arrow = arrow( length = unit(0.2,"cm") ), 
+        #color = 'gray', 
+        alpha = 0.4 
+      ) + 
+      geom_point( aes(x=Var1,y=Var2), size=1, alpha = 0.3) +
+      #geom_text( aes(x=Var1,y=Var2,label = row_id),nudge_y=0.02,size=2) +
+      theme( legend.position = 'none' )
+  },
+  final = m_df %>%
+  { 
+    ggplot(.,aes(x=Var1,y=Var2,color=cluster) ) + 
+      geom_point(size=2 ) +
+      lims( x=c(0,1.04), y=c(0,1.04) ) +
+      #geom_text( aes(label = row_id),nudge_y=0.02,size=2) +
+      theme( legend.position = 'none' )
+  }
+)
+plot_grid( plts$original, plts$tsne, plts$assigned, plts$final, ncol = 2, nrow = 2, labels = c("1","2","3","4") ) %>%
+  print()
+```
+
+### Perform Graph Alignment on t-SNE Coordinates
+
+Now, we apply it to the college dataset t-SNE coordinates.
+
+```{r graph_align,fig.width=10,fig.height=8}
+N_obs <- nrow( tsne_mat_hc_all )
+grid <- expand.grid(1:floor(sqrt(N_obs)),1:ceiling(sqrt(N_obs))) %>% as.matrix() %>% {((.)-min(.))/diff(range(.))}
+grid <- grid[1:N_obs,]
+
+tsne_scaled <- tsne_mat_hc_all %>% {((.)-min(.))/diff(range(.))}
+cost_matrix <- matrix(NA,N_obs,nrow(grid))
+for( i in seq_len(nrow(cost_matrix))){
+  for(j in seq_len(ncol(cost_matrix))){
+    cost_matrix[i,j] <- sqrt( sum((tsne_scaled[i,] - grid[j,])^2) )
+  }
+}
+cost_matrix = cost_matrix * (100000 / max(cost_matrix) )
+rm( tsne_scaled )
+
+px <- LinearAssignment( cost_matrix )
+
+tsne_mat_hc_all %>%
+  as_tibble() %>%
+  mutate( 
+    College = names( cluster_id_all), 
+    cluster = factor( (cluster_id_all %% 7) + 1 )
+  ) %>%
+  slice( px ) %>%
+  cbind( grid * diff(range(tsne_mat_hc_all)) + min(tsne_mat_hc_all) ) %>%
+  {
+    ggplot(.,aes( x = Var1, y = Var2 ) ) + 
+      geom_text(
+        inherit.aes = FALSE,
+        mapping     = aes( x = Var1, y = Var2 , label = College, color = cluster ),
+        show.legend = FALSE,
+        size        = 2,
+        angle       = 45,
+        fontface    = 'bold',
+        check_overlap = TRUE
+      )
+  } %>%
+  plot()
 ```
 
 ## Conclusions
@@ -620,8 +932,8 @@ tsne_select <- tsne_df_all %>%
 
 
 
-|     Group      |     College     |  Y1 | Y2 |  SAT avg. | Cluster |
-|---------------:|----------------:|----:|:---|----------:|--------:|
+| Group |     College     |  Y1 | Y2 |  SAT avg. | Cluster | Comments |
+|------:|----------------:|----:|:---|----------:|--------:|:---------|
 | **Ivy League** | Harvard         | `r tsne_select[ 5,1]` | `r tsne_select[ 5,2]` | `r sat_ugds_select$SAT_AVG[ 5]` | `r sat_ugds_select$cluster[ 5]` |
 |                | Yale            | `r tsne_select[ 6,1]` | `r tsne_select[ 6,2]` | `r sat_ugds_select$SAT_AVG[ 6]` | `r sat_ugds_select$cluster[ 6]` |
 |                | Penn            | `r tsne_select[ 8,1]` | `r tsne_select[ 8,2]` | `r sat_ugds_select$SAT_AVG[ 8]` | `r sat_ugds_select$cluster[ 8]` |
@@ -633,8 +945,8 @@ tsne_select <- tsne_df_all %>%
 |                | Wisconsin       | `r tsne_select[29,1]` | `r tsne_select[29,2]` | `r sat_ugds_select$SAT_AVG[29]` | `r sat_ugds_select$cluster[29]` |
 |                | Purdue          | `r tsne_select[ 3,1]` | `r tsne_select[ 3,2]` | `r sat_ugds_select$SAT_AVG[ 3]` | `r sat_ugds_select$cluster[ 3]` |
 |                | Indiana         | `r tsne_select[30,1]` | `r tsne_select[30,2]` | `r sat_ugds_select$SAT_AVG[30]` | `r sat_ugds_select$cluster[30]` |
-|                | Michigan        | `r tsne_select[ 2,1]` | `r tsne_select[ 2,2]` | `r sat_ugds_select$SAT_AVG[ 2]` | `r sat_ugds_select$cluster[ 2]` |
-|                | Northwestern    | `r tsne_select[ 4,1]` | `r tsne_select[ 4,2]` | `r sat_ugds_select$SAT_AVG[ 4]` | `r sat_ugds_select$cluster[ 4]` |
+|                | Michigan        | `r tsne_select[ 2,1]` | `r tsne_select[ 2,2]` | `r sat_ugds_select$SAT_AVG[ 2]` | `r sat_ugds_select$cluster[ 2]` | is more like Ivies than Big10
+|                | Northwestern    | `r tsne_select[ 4,1]` | `r tsne_select[ 4,2]` | `r sat_ugds_select$SAT_AVG[ 4]` | `r sat_ugds_select$cluster[ 4]` | is more like Ivies than Big10
 |   **HBCUs**    | Howard          | `r tsne_select[11,1]` | `r tsne_select[11,2]` | `r sat_ugds_select$SAT_AVG[11]` | `r sat_ugds_select$cluster[11]` |
 |                | Tuskegee        | `r tsne_select[12,1]` | `r tsne_select[12,2]` | `r sat_ugds_select$SAT_AVG[12]` | `r sat_ugds_select$cluster[12]` |
 |                | Hampton Inst    | `r tsne_select[13,1]` | `r tsne_select[13,2]` | `r sat_ugds_select$SAT_AVG[13]` | `r sat_ugds_select$cluster[13]` |
