@@ -1,14 +1,14 @@
 # Introduction
 
-How'd you like to explore the landscape of 4-year colleges in the USA? 
+How'd you like to explore the landscape of 4-year colleges in the USA? If your answer is "Yes", here's the Bayesian-infused solution I created to do just that: **["Best Colleges for You"](https://thompsonml.shinyapps.io/BestCollegeApp/)**
 
 ![A virtual college roadtrip exploring colleges ranked just for you.](BestCollegeApp_roadtrip1.png)
 
 ## Motivation
 
-My family and I answered this question a couple of years ago with an enthusiastic "We'd love to!"  Not because we have some great love for college exploration.  But, because our daughter would soon be applying to colleges.  Class of '16, she was excited about all the possibilities that college offered.  
+My family and I answered that question a couple of years ago with an enthusiastic "We'd love to!"  Not because we have some great love for college exploration.  But, because our daughter would soon be applying to colleges.  Class of '16, she was excited about all the possibilities that college offered.  
 
-In her case, she had earned a spot as a National Merit Finalist, so she rightfully thought the sky's the limit.  But what if her dream school(s) didn't accept her?  What was going to be her Plan B?  What if she wasn't so sure she really wanted to major in a STEM (science, technology, engineering, math) field but instead wanted to pursue her music and art -- all at which she showed proficiency?  What about locale, region? Classmates, roommates, professors, campus ambience, etc. etc. etc?  And costs?
+In her case, she had earned recognition as a National Merit Finalist, so she rightfully thought the sky's the limit.  But what if her dream school didn't accept her?  What was going to be her Plan B?  What if she wasn't so sure she really wanted to major in a STEM (science, technology, engineering, math) field but instead wanted to pursue her music and art -- all of at which she showed proficiency?  What about locale, region? Classmates, roommates, professors, campus ambience, etc. etc. etc?  And costs?
 
 And then ... where to start? Soon, excitement risked fading into disillusionment ... bewilderment ... anxiety<sup id="a1">[1](#f1)</sup> ....
 
@@ -17,7 +17,7 @@ And then ... where to start? Soon, excitement risked fading into disillusionment
 
 ## Solutions
 
-I think early in the college search process, it's helpful to have a tool that can generate a ranked list of colleges that is customized for the student.  The typical free online resources were far too generic.  As template-driven filters, online tools just screen out eveything not in the particular region, size or cost range you specify. Instead I set out to provide us with some level of customized prioritization -- importance weighting, if you will -- of the criteria driving our selection.  
+I think early in the college search process, it's helpful to have a tool that can generate a ranked list of colleges that is customized for the student.  The typical free online resources were far too generic.  As template-driven filters, online tools just screen out everything not in the particular region, size or cost range you specify. Instead I set out to provide us with some level of customized prioritization -- importance weighting, if you will -- of the criteria driving our selection.  
 
 Thankfully, just as we began the college search process, the U.S. Department of Education released its [College Scorecard](https://collegescorecard.ed.gov/data/) dataset.  Better yet, [Kaggle](https://kaggle.com) had taken the dataset, made it readily useful, and hosted an open "swag" posting that [College Scorecard dataset](https://collegescorecard.ed.gov/data/).  And the *coup de grace*, I'm good at math modeling, especially Bayesian analysis, & know my way around data ([see me...](https://www.linkedin.com/in/mlthomps/)).
 
