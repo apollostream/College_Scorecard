@@ -16,17 +16,21 @@ And then ... where to start? Soon, excitement risked fading into disillusionment
 
 ## Solutions
 
-The typical free online resources were far too generic.  As template-driven filters, online tools just screened out eveything not in the particular region, size or cost range you specified.  Sure, there were fee-based services, but what we were looking for was something with a much lighter engagement yet still with a way to show a list of colleges that satisfied some level of customized prioritization -- importance weighting, if you will -- of the criteria driving our selection.
+I think early in the college search process, it's helpful to have a tool that can generate a ranked list of colleges that is customized for the student.  The typical free online resources were far too generic.  As template-driven filters, online tools just screen out eveything not in the particular region, size or cost range you specify. Instead I set out to provide us with some level of customized prioritization -- importance weighting, if you will -- of the criteria driving our selection.  
 
-Well, thankfully, the U.S. Department of Education had just released its [College Scorecard](https://collegescorecard.ed.gov/data/) data.  And to slap icing on that cake, [Kaggle](https://kaggle.com) had just started an open "swag" posting that [College Scorecard dataset]().  And the *coup de grace*, I'm good at math modeling & know my way around data ([see me...](https://www.linkedin.com/in/mlthomps/)).
+Thankfully, just as we began the college search process, the U.S. Department of Education released its [College Scorecard](https://collegescorecard.ed.gov/data/) dataset.  Better yet, [Kaggle](https://kaggle.com) had taken the dataset, made it readily useful, and hosted an open "swag" posting that [College Scorecard dataset](https://collegescorecard.ed.gov/data/).  And the *coup de grace*, I'm good at math modeling, especially Bayesian analysis, & know my way around data ([see me...](https://www.linkedin.com/in/mlthomps/)).
 
 So, I entered the Kaggle contest, won a nod as ["Script of the Week" for January 8, 2016](http://blog.kaggle.com/2016/02/19/december-2015-january-2016-scripts-of-the-week/), and got a Kaggle t-shirt out of it!
 
-Encouraged by this outcome and looking to build an easy-to-use tool, I whipped up an R Shiny app to help us explore the landscape of 4-year colleges in the USA: ["Best Colleges for You"](https://thompsonml.shinyapps.io/BestCollegeApp/)!
+![Reward for Kaggle.com "Script of the Week", January 8, 2016](http://github.com/apollostream/College_Scorecard/blob/master/kaggle_tshirt.jpg)
+
+Encouraged by this outcome and looking to build an easy-to-use tool, I took things a step further and created a web-based R Shiny app to help us explore the landscape of 4-year colleges in the USA: ["Best Colleges for You"](https://thompsonml.shinyapps.io/BestCollegeApp/)!
 
 ## What of It?
 
 In this post, I'll give you a quick run through of the "Best Colleges for You" app to give you an idea of what you might do with it.  Hopefully, the different college rankings it generates just for you will surface some college options you hadn't entertained yet and spark your imagination to explore further afield for a college that's right for you.
+
+Also, for the data scientists out there, this post gives a brief description of the Bayesian bits and discrete choice modeling-motivated engine that drives the customized ranked lists that the app generates.
 
 # Getting Started
 
