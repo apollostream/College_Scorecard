@@ -13,9 +13,7 @@ In her case, she had earned a spot as a National Merit Finalist, so she rightful
 And then ... where to start? Soon, excitement risked fading into disillusionment ... bewilderment ... anxiety<sup id="a1">[1](#f1)</sup> ....
 
 
-![by Idea Trader/Shutterstock.com](https://github.com/apollostream/College_Scorecard/blob/master/shutterstock_701062771.jpg) <!-- .element height="50%" width="50%" --><sup id="a1">[1](#f2)</sup>
-
-<b id="f1">1</b>Image by Idea Trader/Shutterstock.com. [↩](#a1)
+![by Idea Trader/Shutterstock.com](https://github.com/apollostream/College_Scorecard/blob/master/shutterstock_701062771.jpg) <!-- .element height="50%" width="50%" -->
 
 ## Solutions
 
@@ -36,4 +34,6 @@ In this post, I'll give you a quick run through of the "Best Colleges for You" a
 Also, for the data scientists out there, this post gives a brief description of the Bayesian bits and discrete choice modeling-motivated engine that drives the customized ranked lists that the app generates.
 
 # Getting Started
+
+<b id="f1">1.</b> Image by Idea Trader/Shutterstock.com. [↩](#a1)
 
