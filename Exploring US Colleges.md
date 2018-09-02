@@ -1,6 +1,6 @@
 # Introduction
 
-How'd you like to explore the landscape of 4-year colleges in the USA? If your answer is "Yes", here's the Bayesian-infused solution I created to do just that: [**"Best Colleges for You"**](https://thompsonml.shinyapps.io/BestCollegeApp/).
+How'd you like to explore the landscape of 4-year colleges in the USA? If your answer is "Yes", here's the Bayesian-infused solution I created to do just that: [**"Best Colleges for You"**](https://thompsonml.shinyapps.io/BestCollegeApp/) -- (open this link in a new tab).
 ![A virtual college roadtrip exploring colleges ranked just for you.](BestCollegeApp_roadtrip1.png)
 
 ## Motivation
