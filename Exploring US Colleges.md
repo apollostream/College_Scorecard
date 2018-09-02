@@ -12,10 +12,10 @@ In her case, she had earned a spot as a National Merit Finalist, so she rightful
 
 And then ... where to start? Soon, excitement risked fading into disillusionment ... bewilderment ... anxiety ....
 
-<sup name="a1">[1](#f1)</sup>
+
 ![by Idea Trader/Shutterstock.com](https://github.com/apollostream/College_Scorecard/blob/master/shutterstock_701062771.jpg) <!-- .element height="50%" width="50%" -->
 
-<b id="f1">1</b> by Idea Trader/Shutterstock.com [↩](#a1)
+<b id="f1">1</b>Image by Idea Trader/Shutterstock.com. [↩](#a1)
 
 ## Solutions
 
