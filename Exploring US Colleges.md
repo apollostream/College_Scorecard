@@ -10,10 +10,10 @@ My family and I answered this question a couple of years ago with an enthusiasti
 
 In her case, she had earned a spot as a National Merit Finalist, so she rightfully thought the sky's the limit.  But what if her dream school(s) didn't accept her?  What was going to be her Plan B?  What if she wasn't so sure she really wanted to major in a STEM (science, technology, engineering, math) field but instead wanted to pursue her music and art -- all at which she showed proficiency?  What about locale, region? Classmates, roommates, professors, campus ambience, etc. etc. etc?  And costs?
 
-And then ... where to start? Soon, excitement risked fading into disillusionment ... bewilderment ... anxiety ....
+And then ... where to start? Soon, excitement risked fading into disillusionment ... bewilderment ... anxiety<sup id="a1">[1](#f1)</sup> ....
 
 
-![by Idea Trader/Shutterstock.com](https://github.com/apollostream/College_Scorecard/blob/master/shutterstock_701062771.jpg) <!-- .element height="50%" width="50%" -->
+![by Idea Trader/Shutterstock.com](https://github.com/apollostream/College_Scorecard/blob/master/shutterstock_701062771.jpg) <!-- .element height="50%" width="50%" --><sup id="a1">[1](#f2)</sup>
 
 <b id="f1">1</b>Image by Idea Trader/Shutterstock.com. [↩](#a1)
 
