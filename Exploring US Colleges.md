@@ -1,6 +1,8 @@
 # Introduction
 
-How'd you like to explore the landscape of 4-year colleges in the USA?  
+How'd you like to explore the landscape of 4-year colleges in the USA? 
+
+![A virtual college roadtrip exploring colleges ranked just for you.](BestCollegeApp_roadtrip1.png)
 
 ## Motivation
 
@@ -23,7 +25,7 @@ Encouraged by this outcome and looking to build an easier to use tool, I whipped
 
 ## What of It?
 
-Here, I'll give you a quick run through of the Best Colleges for You to give you an idea of what you might do with it.  Hopefully, the different college rankings it generates for you will surface some college options you hadn't entertained yet and spark your imagination to explore further afield for the college that's just right for you.
+Here, I'll give you a quick run through of the ["Best Colleges for You" app](https://thompsonml.shinyapps.io/BestCollegeApp/) to give you an idea of what you might do with it.  Hopefully, the different college rankings it generates just for you will surface some college options you hadn't entertained yet and spark your imagination to explore further afield for a college that's right for you.
 
 # Getting Started
 
