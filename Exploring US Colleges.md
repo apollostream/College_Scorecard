@@ -12,7 +12,7 @@ In her case, she had earned a spot as a National Merit Finalist, so she rightful
 
 And then ... where to start? Soon, excitement risked fading into disillusionment ... bewilderment ... anxiety ....
 
-![by Idea Trader/Shutterstock.com](shutterstock_701062771_25pct.jpg)
+![by Idea Trader/Shutterstock.com](shutterstock_701062771_25pct.jpg=500x416)
 
 ## Solutions
 
