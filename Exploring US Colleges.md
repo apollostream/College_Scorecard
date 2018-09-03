@@ -37,13 +37,13 @@ Also, for the data scientists out there, this post gives a brief description of 
 # Bayesian Bits
 
 Bayesian analysis really excels at inferring things about unobserved things -- whether they be events, values of variables, or assumed cognitive constructs in a persons mind -- from evidence supplied by measured and known things.  In the "Best Colleges for You" app, the unknown things are how strongly a student will value attendance at each college.  The measured things are the distributions of relevant student body properties, like test scores, admission rates, ethnicities, income distributions, future earnings, debt loads, etc. And the known things that fall into 3 categories:
-1.   Who the student is, like their test score, ethnicity, income, etc.
-2.   What the student prefers in a college, like the region in which it's located, the locale in terms of how urban or rural the campus is, etc.
-3.   How the student prioritizes the factors of the college experience in terms of four key dimensions:
-    +  "Risk" -- how much deviation from the student's own demographics and region of preference vs. alignment with the student's demographics and preferred region
-    +  "Vision" -- how much future-looking beyond college vs. short-term on-campus experience
-    +  "Breadth" -- how broad of a variety of academic disciplines available vs. concentration of degrees in a handful of disciplines
-    +  "Challenge" -- how stretching the academic rigor is relative to the student's capabilities vs. being well within the student's academic capabilities.
+1. Who the student is, like their test score, ethnicity, income, etc.
+2. What the student prefers in a college, like the region in which it's located, the locale in terms of how urban or rural the campus is, etc.
+3. How the student prioritizes the factors of the college experience in terms of four key dimensions:
+   - "Risk" -- how much deviation from the student's own demographics and region of preference vs. alignment with the student's demographics and preferred region
+   - "Vision" -- how much future-looking beyond college vs. short-term on-campus experience
+   - "Breadth" -- how broad of a variety of academic disciplines available vs. concentration of degrees in a handful of disciplines
+   - "Challenge" -- how stretching the academic rigor is relative to the student's capabilities vs. being well within the student's academic capabilities.
     
 The app uses a *Probabilistic Graphical Model* representation of a *discrete choice model* to convert these factors and weights into a latent valuation of each of the more than 1000 4-year not-for-profit private and public colleges in the database, which in turn is converted into a choice probability amongst the top-*N* colleges shown in a ranked list.
 
